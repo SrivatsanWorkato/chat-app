@@ -8,12 +8,14 @@ const SYSTEM_PROMPTS = {
 } satisfies Record<Exclude<RoutedMode, "image">, string>;
 
 function validMessages(value: unknown): value is ChatMessage[] {
-  return Array.isArray(value) && value.length > 0 && value.length <= 30 && value.every((message) => {
+  return Array.isArray(value) && value.length > 0 && value.length <= 30 && value.every((message, index) => {
     if (!message || typeof message !== "object") return false;
     const item = message as Partial<ChatMessage>;
     const contentLength = typeof item.content === "string" ? item.content.length : -1;
     const validAttachments = item.attachments === undefined || (Array.isArray(item.attachments) && item.attachments.length <= 4 && item.attachments.every((attachment) => typeof attachment.name === "string" && ["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(attachment.mediaType) && typeof attachment.dataUrl === "string" && attachment.dataUrl.startsWith(`data:${attachment.mediaType};base64,`) && attachment.dataUrl.length <= 14_000_000));
-    return (item.role === "user" || item.role === "assistant") && contentLength >= 0 && contentLength <= 20_000 && validAttachments && (contentLength > 0 || Boolean(item.attachments?.length));
+    const nonEmpty = contentLength > 0 || Boolean(item.attachments?.length);
+    // Only the latest message must carry content or attachments; empty assistant entries are valid history.
+    return (item.role === "user" || item.role === "assistant") && contentLength >= 0 && contentLength <= 20_000 && validAttachments && (nonEmpty || index < value.length - 1);
   });
 }
 

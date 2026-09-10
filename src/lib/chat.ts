@@ -78,3 +78,15 @@ export const FALLBACK_MODELS = {
   brain: ["upstage/solar-pro4"],
   vision: [],
 } as const;
+
+export type MessageRoute = Pick<ChatResponse, "mode" | "model" | "rationale" | "trace" | "routeSource"> & { fallbackModels?: string[]; webSearch?: boolean };
+
+export type StoredMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  route?: MessageRoute;
+  image?: ChatResponse["image"];
+  attachments?: ChatAttachment[];
+  mix?: { plan: MixPlan; tasks: MixTaskState[]; completed: boolean };
+};

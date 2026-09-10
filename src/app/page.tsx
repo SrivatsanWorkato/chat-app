@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import type { ChatAttachment, ChatMode, ChatResponse, MixPlan, MixTaskState } from "@/lib/chat";
+import type { ChatAttachment, ChatMode, ChatResponse, MixPlan, StoredMessage } from "@/lib/chat";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -15,25 +15,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ArrowUp, Menu, Mic, Moon, MoreVertical, Pin, Plus, Sparkles, Sun, Trash2, X } from "lucide-react";
 
-type Message = {
-  id: number;
-  role: "user" | "assistant";
-  content: string;
-  route?: Pick<ChatResponse, "mode" | "model" | "rationale" | "trace" | "routeSource"> & { fallbackModels?: string[]; webSearch?: boolean };
-  image?: ChatResponse["image"];
-  attachments?: ChatAttachment[];
-  mix?: { plan: MixPlan; tasks: MixTaskState[]; completed: boolean };
-};
+type Message = StoredMessage;
 
 type Conversation = {
   id: string;
   title: string;
   updatedAt: number;
-  messages: Message[];
   pinned?: boolean;
 };
 
-const STORAGE_KEY = "chat-ui-conversations-v1";
 
 const starters = [
   { icon: "✦", title: "Create an image", detail: "for my presentation" },
@@ -56,7 +46,6 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
-  const [storageReady, setStorageReady] = useState(false);
   const [input, setInput] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isResponding, setIsResponding] = useState(false);
@@ -67,41 +56,132 @@ export default function Home() {
   const [requestStatus, setRequestStatus] = useState("");
   const [developerMode, setDeveloperMode] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
-  const [mixApproval, setMixApproval] = useState<{ messageId: number; prompt: string; plan: MixPlan; taskId: string } | null>(null);
-  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [mixApproval, setMixApproval] = useState<{ messageId: string; prompt: string; plan: MixPlan; taskId: string } | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editedMessage, setEditedMessage] = useState("");
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [conversationTitle, setConversationTitle] = useState("");
+
+  const loadedConversations = useRef(new Set<string>());
+  const messagesCache = useRef(new Map<string, Message[]>());
+  const messagesRef = useRef<Message[]>(messages);
+  const activeIdRef = useRef(activeConversationId);
+  const syncInFlight = useRef(false);
+  const syncPending = useRef<{ conversationId: string; snapshot: Message[] } | true | false>(false);
+
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(STORAGE_KEY);
-      const parsed = stored ? JSON.parse(stored) as unknown : [];
-      if (Array.isArray(parsed)) {
-        const valid = parsed.filter((item): item is Conversation => Boolean(item && typeof item === "object" && typeof item.id === "string" && typeof item.title === "string" && typeof item.updatedAt === "number" && Array.isArray(item.messages)));
-        setConversations(valid);
-        if (valid[0]) {
-          setActiveConversationId(valid[0].id);
-          setMessages(valid[0].messages);
+    activeIdRef.current = activeConversationId;
+    if (activeConversationId) messagesCache.current.set(activeConversationId, messages);
+  }, [messages, activeConversationId]);
+
+  function updateMessages(action: Message[] | ((current: Message[]) => Message[])) {
+    const next = typeof action === "function" ? action(messagesRef.current) : action;
+    messagesRef.current = next;
+    setMessages(next);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function initConversations() {
+      try {
+        const res = await fetch("/api/conversations");
+        if (!res.ok) throw new Error("Unable to load conversations");
+        const rows = await res.json() as { id: string; title: string; pinned: boolean; updatedAt: string }[];
+        if (cancelled) return;
+        setConversations(rows.map((row) => ({ id: row.id, title: row.title, pinned: row.pinned, updatedAt: Date.parse(row.updatedAt) })));
+        if (rows[0]) {
+          setActiveConversationId(rows[0].id);
+          const detail = await fetch(`/api/conversations/${rows[0].id}`);
+          if (!detail.ok) throw new Error("Unable to load conversation");
+          const data = await detail.json() as { id: string; title: string; pinned: boolean; updatedAt: string; messages: StoredMessage[] };
+          if (cancelled) return;
+          loadedConversations.current.add(data.id);
+          setConversations((current) => current.map((conversation) => conversation.id === data.id
+            ? { ...conversation, title: data.title, pinned: data.pinned, updatedAt: Date.parse(data.updatedAt) }
+            : conversation));
+          updateMessages(data.messages);
         }
+      } catch {
+        if (!cancelled) setError("Unable to load conversations");
       }
-    } catch {
-      window.localStorage.removeItem(STORAGE_KEY);
     }
-    setStorageReady(true);
+    void initConversations();
+    return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
-    if (!storageReady) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
-  }, [conversations, storageReady]);
+  function evictConversation(id: string) {
+    loadedConversations.current.delete(id);
+    messagesCache.current.delete(id);
+    setConversations((current) => current.filter((conversation) => conversation.id !== id));
+    if (activeIdRef.current === id) {
+      setActiveConversationId("");
+      updateMessages([]);
+    }
+  }
 
-  useEffect(() => {
-    if (!storageReady || !activeConversationId) return;
-    setConversations((current) => current.map((conversation) => conversation.id === activeConversationId
-      ? { ...conversation, messages, title: messages.find((message) => message.role === "user")?.content.slice(0, 44) || conversation.title, updatedAt: Date.now() }
+  async function loadConversation(id: string) {
+    const res = await fetch(`/api/conversations/${id}`);
+    if (res.status === 404) {
+      evictConversation(id);
+      setError("This chat was deleted");
+      return;
+    }
+    if (!res.ok) throw new Error("Unable to load conversation");
+    const data = await res.json() as { id: string; title: string; pinned: boolean; updatedAt: string; messages: StoredMessage[] };
+    loadedConversations.current.add(id);
+    setConversations((current) => current.map((conversation) => conversation.id === id
+      ? { ...conversation, title: data.title, pinned: data.pinned, updatedAt: Date.parse(data.updatedAt) }
       : conversation));
-  }, [messages, activeConversationId, storageReady]);
+    updateMessages(data.messages);
+  }
+
+  async function putMessages(conversationId: string, snapshot: Message[]) {
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}/messages`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: snapshot.map(({ role, content, attachments, route, image, mix }) => ({ role, content, attachments, route, image, mix })) }),
+      });
+      if (res.status === 404) {
+        evictConversation(conversationId);
+        setError("This chat was deleted");
+        return false;
+      }
+      if (!res.ok) throw new Error("Unable to save conversation");
+      const result = await res.json() as { title: string; updatedAt: string };
+      setConversations((current) => current.map((conversation) => conversation.id === conversationId
+        ? { ...conversation, title: result.title, updatedAt: Date.parse(result.updatedAt) }
+        : conversation));
+      return true;
+    } catch {
+      setError("Unable to save conversation");
+      return false;
+    }
+  }
+
+  async function syncNow(override?: { conversationId: string; snapshot: Message[] }) {
+    if (syncInFlight.current) {
+      syncPending.current = override ?? true;
+      return;
+    }
+    syncInFlight.current = true;
+    try {
+      for (;;) {
+        const pending = syncPending.current;
+        syncPending.current = false;
+        const target = pending && pending !== true ? pending : null;
+        const conversationId = target?.conversationId ?? activeIdRef.current;
+        const snapshot = target?.snapshot ?? messagesRef.current;
+        if (!conversationId || snapshot.length === 0) break;
+        const saved = await putMessages(conversationId, snapshot);
+        if (!saved || !syncPending.current) break;
+      }
+    } finally {
+      syncInFlight.current = false;
+    }
+  }
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -123,40 +203,72 @@ export default function Home() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isResponding]);
-  function startNewChat() {
-    const id = crypto.randomUUID();
-    const conversation: Conversation = { id, title: "New chat", updatedAt: Date.now(), messages: [] };
-    setConversations((current) => [conversation, ...current]);
-    setActiveConversationId(id);
-    setMessages([]);
-    setInput("");
-    setSidebarOpen(false);
-    setAttachments([]);
-    setError("");
+  async function startNewChat() {
+    try {
+      const res = await fetch("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      if (!res.ok) throw new Error("Unable to create conversation");
+      const row = await res.json() as { id: string; title: string; pinned: boolean; updatedAt: string };
+      loadedConversations.current.add(row.id);
+      setConversations((current) => [{ id: row.id, title: row.title, pinned: row.pinned, updatedAt: Date.parse(row.updatedAt) }, ...current]);
+      setActiveConversationId(row.id);
+      updateMessages([]);
+      setInput("");
+      setSidebarOpen(false);
+      setAttachments([]);
+      setError("");
+    } catch {
+      setError("Unable to create conversation");
+    }
   }
 
-  function selectConversation(conversation: Conversation) {
+  async function selectConversation(conversation: Conversation) {
     if (isResponding) return;
-    setActiveConversationId(conversation.id);
-    setMessages(conversation.messages);
+    updateMessages(messagesCache.current.get(conversation.id) ?? []);
     setSidebarOpen(false);
     setError("");
+    if (!loadedConversations.current.has(conversation.id)) {
+      try {
+        await loadConversation(conversation.id);
+      } catch {
+        setError("Unable to load conversation");
+      }
+    }
   }
 
-  function deleteConversation(id: string) {
+  async function deleteConversation(id: string) {
     if (isResponding) return;
     const remaining = conversations.filter((conversation) => conversation.id !== id);
     setConversations(remaining);
+    loadedConversations.current.delete(id);
     if (id === activeConversationId) {
       const next = remaining[0];
       setActiveConversationId(next?.id ?? "");
-      setMessages(next?.messages ?? []);
+      if (next && !loadedConversations.current.has(next.id)) {
+        updateMessages([]);
+        try {
+          await loadConversation(next.id);
+        } catch {
+          setError("Unable to load conversation");
+        }
+      } else {
+        updateMessages(messagesCache.current.get(next.id) ?? []);
+      }
+    }
+    try {
+      const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Unable to delete conversation");
+    } catch {
+      setError("Unable to delete conversation");
     }
   }
 
   function togglePinnedConversation(id: string) {
-    setConversations((current) => current.map((conversation) => conversation.id === id ? { ...conversation, pinned: !conversation.pinned } : conversation));
+    const nextPinned = !conversations.find((conversation) => conversation.id === id)?.pinned;
+    setConversations((current) => current.map((conversation) => conversation.id === id ? { ...conversation, pinned: nextPinned } : conversation));
     setConversationMenuId(null);
+    void fetch(`/api/conversations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pinned: nextPinned }) }).then((res) => {
+      if (!res.ok) setError("Unable to update conversation");
+    }).catch(() => setError("Unable to update conversation"));
   }
 
   function startRenamingConversation(conversation: Conversation) {
@@ -171,9 +283,12 @@ export default function Home() {
     setConversations((current) => current.map((conversation) => conversation.id === id ? { ...conversation, title: title.slice(0, 80), updatedAt: Date.now() } : conversation));
     setRenamingConversationId(null);
     setConversationTitle("");
+    void fetch(`/api/conversations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) }).then((res) => {
+      if (!res.ok) setError("Unable to update conversation");
+    }).catch(() => setError("Unable to update conversation"));
   }
-  async function runMix(prompt: string, plan?: MixPlan, approveImageTaskId?: string, existingMessageId?: number) {
-    const assistantId = existingMessageId ?? Date.now() + 1;
+  async function runMix(prompt: string, plan?: MixPlan, approveImageTaskId?: string, existingMessageId?: string, conversationId?: string) {
+    const assistantId = existingMessageId ?? crypto.randomUUID();
     setRequestStatus(plan ? "Generating approved image" : "Planning workflow");
     setIsResponding(true);
     try {
@@ -198,22 +313,22 @@ export default function Home() {
           if (event.type === "mix_plan" && event.plan) {
             activePlan = event.plan;
             const mix = { plan: event.plan, tasks: event.plan.tasks.map((task) => ({ ...task, status: "pending" as const })), completed: false };
-            if (existingMessageId) setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, mix } : message));
-            else setMessages((current) => [...current, { id: assistantId, role: "assistant", content: "", mix }]);
+            if (existingMessageId) updateMessages((current) => current.map((message) => message.id === assistantId ? { ...message, mix } : message));
+            else updateMessages((current) => [...current, { id: assistantId, role: "assistant", content: "", mix }]);
           } else if (event.type === "mix_task_started") {
             setRequestStatus(`Running ${event.taskId}`);
-            setMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "running", model: event.model } : task) } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "running", model: event.model } : task) } } : message));
           } else if (event.type === "mix_task_delta") {
-            setMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, output: (task.output ?? "") + (event.content ?? "") } : task) } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, output: (task.output ?? "") + (event.content ?? "") } : task) } } : message));
           } else if (event.type === "mix_task_completed") {
-            setMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "completed", output: event.output ?? task.output, image: event.image, model: event.model ?? task.model } : task) } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "completed", output: event.output ?? task.output, image: event.image, model: event.model ?? task.model } : task) } } : message));
           } else if (event.type === "mix_approval" && event.taskId && activePlan) {
             setMixApproval({ messageId: assistantId, prompt, plan: activePlan, taskId: event.taskId });
-            setMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "approval_required" } : task) } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "approval_required" } : task) } } : message));
           } else if (event.type === "mix_task_failed") {
-            setMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "failed", error: event.error } : task) } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, tasks: message.mix.tasks.map((task) => task.id === event.taskId ? { ...task, status: "failed", error: event.error } : task) } } : message));
           } else if (event.type === "mix_completed") {
-            setMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, completed: true } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.mix ? { ...message, mix: { ...message.mix, completed: true } } : message));
           }
         }
       }
@@ -222,6 +337,7 @@ export default function Home() {
     } finally {
       setRequestStatus("");
       setIsResponding(false);
+      if (conversationId) void syncNow({ conversationId, snapshot: messagesRef.current });
     }
   }
 
@@ -229,13 +345,23 @@ export default function Home() {
   async function submitMessage(text = input, requestedMode: ChatMode = mode) {
     const content = text.trim();
     if ((!content && attachments.length === 0) || isResponding) return;
-    if (!activeConversationId) {
-      const id = crypto.randomUUID();
-      setActiveConversationId(id);
-      setConversations((current) => [{ id, title: content.slice(0, 44) || "New chat", updatedAt: Date.now(), messages: [] }, ...current]);
+    let conversationId = activeConversationId;
+    if (!conversationId) {
+      try {
+        const res = await fetch("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: content.slice(0, 44) || "New chat" }) });
+        if (!res.ok) throw new Error("Unable to create conversation");
+        const row = await res.json() as { id: string; title: string; pinned: boolean; updatedAt: string };
+        conversationId = row.id;
+        loadedConversations.current.add(row.id);
+        setConversations((current) => [{ id: row.id, title: row.title, pinned: row.pinned, updatedAt: Date.parse(row.updatedAt) }, ...current]);
+        setActiveConversationId(row.id);
+      } catch {
+        setError("Unable to create conversation");
+        return;
+      }
     }
 
-    const userMessage: Message = { id: Date.now(), role: "user", content, attachments };
+    const userMessage: Message = { id: crypto.randomUUID(), role: "user", content, attachments };
     const recentMessages = messages.slice(-11);
     const requestMessages = [...recentMessages.map(({ role, content: messageContent }) => ({
       role,
@@ -245,10 +371,14 @@ export default function Home() {
       content: userMessage.content,
       attachments: userMessage.attachments,
     }];
-    setMessages((current) => [...current, userMessage]);
+    updateMessages((current) => [...current, userMessage]);
     setInput("");
+    void syncNow({ conversationId, snapshot: [...messages, userMessage] });
+    setConversations((current) => current.map((conversation) => conversation.id === conversationId
+      ? { ...conversation, title: conversation.title === "New chat" ? content.slice(0, 44) || conversation.title : conversation.title }
+      : conversation));
     if (requestedMode === "mix") {
-      runMix(content);
+      runMix(content, undefined, undefined, undefined, conversationId);
       return;
     }
     setAttachments([]);
@@ -265,13 +395,13 @@ export default function Home() {
       if (!request.ok || request.headers.get("content-type")?.includes("application/json")) {
         const result = (await request.json()) as Partial<ChatResponse> & { error?: string };
         if (!request.ok) throw new Error(result.error ?? "The request failed");
-        setMessages((current) => [...current, { id: Date.now() + 1, role: "assistant", content: result.content ?? "", route: { mode: result.mode!, model: result.model!, rationale: result.rationale!, trace: result.trace ?? [] }, image: result.image }]);
+        updateMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", content: result.content ?? "", route: { mode: result.mode!, model: result.model!, rationale: result.rationale!, trace: result.trace ?? [] }, image: result.image }]);
         return;
       }
 
       const reader = request.body?.getReader();
       if (!reader) throw new Error("The response stream was unavailable");
-      const assistantId = Date.now() + 1;
+      const assistantId = crypto.randomUUID();
       const decoder = new TextDecoder();
       let buffer = "";
       let assistantAdded = false;
@@ -286,20 +416,20 @@ export default function Home() {
           if (event.type === "meta") {
             assistantAdded = true;
             setRequestStatus(event.webSearch ? "Searching the web" : `${modeLabels[event.mode!]} is thinking`);
-            setMessages((current) => [...current, { id: assistantId, role: "assistant", content: "", route: { mode: event.mode!, model: event.model!, fallbackModels: event.fallbackModels, routeSource: event.routeSource, rationale: event.rationale!, webSearch: event.webSearch, trace: event.trace ?? [] } }]);
+            updateMessages((current) => [...current, { id: assistantId, role: "assistant", content: "", route: { mode: event.mode!, model: event.model!, fallbackModels: event.fallbackModels, routeSource: event.routeSource, rationale: event.rationale!, webSearch: event.webSearch, trace: event.trace ?? [] } }]);
           } else if (event.type === "status" && event.status) {
             setRequestStatus(event.status);
           } else if (event.type === "fallback") {
             setRequestStatus(`Trying fallback ${event.model}`);
-            setMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, route: { ...message.route, model: event.model ?? message.route.model, rationale: `Primary model failed; continuing with ${event.model}.`, trace: event.trace ?? message.route.trace } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, route: { ...message.route, model: event.model ?? message.route.model, rationale: `Primary model failed; continuing with ${event.model}.`, trace: event.trace ?? message.route.trace } } : message));
           } else if (event.type === "delta" && event.content) {
             setRequestStatus("Generating response");
-            setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, content: message.content + event.content } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId ? { ...message, content: message.content + event.content } : message));
           } else if (event.type === "done") {
             setRequestStatus("");
-            setMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, route: { ...message.route, trace: event.trace ?? [] } } : message));
+            updateMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, route: { ...message.route, trace: event.trace ?? [] } } : message));
           } else if (event.type === "error") {
-            if (assistantAdded) setMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, content: message.content || event.error || "The provider stream failed", route: { ...message.route, trace: event.trace ?? [] } } : message));
+            if (assistantAdded) updateMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, content: message.content || event.error || "The provider stream failed", route: { ...message.route, trace: event.trace ?? [] } } : message));
             throw new Error(event.error ?? "The provider stream failed");
           }
         }
@@ -309,6 +439,7 @@ export default function Home() {
     } finally {
       setIsResponding(false);
       setRequestStatus("");
+      void syncNow({ conversationId, snapshot: messagesRef.current });
     }
   }
 
@@ -345,11 +476,11 @@ export default function Home() {
     event.preventDefault();
     submitMessage();
   }
-  function resendEditedMessage(messageId: number) {
+  function resendEditedMessage(messageId: string) {
     const index = messages.findIndex((message) => message.id === messageId && message.role === "user");
     const content = editedMessage.trim();
     if (index < 0 || !content || isResponding) return;
-    setMessages(messages.slice(0, index));
+    updateMessages(messages.slice(0, index));
     setEditingMessageId(null);
     setEditedMessage("");
     submitMessage(content, mode);
@@ -367,7 +498,7 @@ export default function Home() {
     }
   }
 
-  function retryMessage(messageId: number, nextMode: Exclude<ChatMode, "auto">) {
+  function retryMessage(messageId: string, nextMode: Exclude<ChatMode, "auto">) {
     const index = messages.findIndex((message) => message.id === messageId);
     const precedingUser = index >= 0 ? messages.slice(0, index).reverse().find((message) => message.role === "user") : undefined;
     if (!precedingUser) return;
@@ -462,6 +593,11 @@ export default function Home() {
                   </Card>
                 ))}
               </div>
+              {error && (
+                <Alert variant="destructive" className="error-row">
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
             </div>
           ) : (
             <div className="message-list">
@@ -509,7 +645,7 @@ export default function Home() {
                                 {task.image && <figure className="generated-image-wrap"><img className="generated-image" src={task.image.dataUrl} alt={task.title} /><a className="image-download" href={task.image.dataUrl} download={`${task.id}.png`}>Download</a></figure>}
                                 {task.error && <Alert variant="destructive" className="mix-error"><AlertDescription>{task.error}</AlertDescription></Alert>}
                                 {task.status === "approval_required" && mixApproval?.taskId === task.id && (
-                                  <Button className="approve-image" onClick={() => { const approval = mixApproval; setMixApproval(null); runMix(approval.prompt, approval.plan, approval.taskId, approval.messageId); }} disabled={isResponding}>Generate image · ~$0.019</Button>
+                                  <Button className="approve-image" onClick={() => { const approval = mixApproval; setMixApproval(null); runMix(approval.prompt, approval.plan, approval.taskId, approval.messageId, activeConversationId); }} disabled={isResponding}>Generate image · ~$0.019</Button>
                                 )}
                               </li>
                             ))}
