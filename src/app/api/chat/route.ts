@@ -1,4 +1,4 @@
-import { ChatMessage, ChatRequest, CHAT_MODES, FALLBACK_MODELS, MODELS, ModelAttempt, RoutedMode } from "@/lib/chat";
+import { ChatMessage, ChatRequest, CHAT_MODES, CustomProviderConfig, FALLBACK_MODELS, MODELS, ModelAttempt, parseCustomProvider, RoutedMode } from "@/lib/chat";
 import { completeWithFallback, generateImage, logStreamResult, ModelExecutionError, streamCompletion, StreamingCompletion } from "@/lib/openrouter";
 
 const ROUTER_PROMPT = `Return exactly one JSON object: {"mode":"blitz|brain|image","rationale":"short reason"}. Use blitz for short answers and rewrites, brain for plans and complex work, and image only for explicit image generation.`;
@@ -28,11 +28,14 @@ function deterministicRoute(message: ChatMessage): { mode: RoutedMode; rationale
   return null;
 }
 
-async function decideRoute(messages: ChatMessage[]): Promise<{ mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "rule" | "model" }> {
+async function decideRoute(messages: ChatMessage[], provider?: CustomProviderConfig): Promise<{ mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "rule" | "model" }> {
   const latest = messages.at(-1)!;
   const deterministic = deterministicRoute(latest);
   if (deterministic) return { ...deterministic, trace: [], routeSource: "rule" };
-  const result = await completeWithFallback("router", [MODELS.router, ...FALLBACK_MODELS.router], [{ role: "user", content: `${ROUTER_PROMPT}\n\n${latest.content}` }]);
+  const models = provider
+    ? [provider.models.brain, provider.fallbackModels?.brain].filter((model): model is string => Boolean(model))
+    : [MODELS.router, ...FALLBACK_MODELS.router];
+  const result = await completeWithFallback("router", models, [{ role: "user", content: `${ROUTER_PROMPT}\n\n${latest.content}` }], { provider });
   try {
     const parsed = JSON.parse(result.content) as { mode?: unknown; rationale?: unknown };
     if ((parsed.mode === "blitz" || parsed.mode === "brain" || parsed.mode === "image") && typeof parsed.rationale === "string") return { mode: parsed.mode, rationale: parsed.rationale, trace: result.trace, routeSource: "model" };
@@ -49,20 +52,29 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json()) as Partial<ChatRequest>;
     if (!CHAT_MODES.includes(body.mode as ChatRequest["mode"]) || body.mode === "mix" || typeof body.webSearch !== "boolean" || !validMessages(body.messages)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
+    const provider = parseCustomProvider(body.provider);
     const messages = body.messages;
-    const webSearch = body.webSearch;
-    const selected: { mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "manual" | "rule" | "model" } = body.mode === "auto" ? await decideRoute(messages) : { mode: body.mode as RoutedMode, rationale: `You selected ${body.mode} mode.`, trace: [], routeSource: "manual" };
+    const webSearch = provider ? false : body.webSearch;
+    const selected: { mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "manual" | "rule" | "model" } = body.mode === "auto" ? await decideRoute(messages, provider) : { mode: body.mode as RoutedMode, rationale: `You selected ${body.mode} mode.`, trace: [], routeSource: "manual" };
     trace.push(...selected.trace);
     const hasAttachments = messages.some((message) => message.attachments?.length);
     if (hasAttachments && selected.mode === "image") selected.mode = "brain";
     if (selected.mode === "image") {
-      const image = await generateImage(MODELS.image, messages.at(-1)?.content ?? "");
-      return Response.json({ mode: "image", model: MODELS.image, routeSource: selected.routeSource, rationale: selected.rationale, content: "I generated an image from your prompt.", image: { dataUrl: image.dataUrl, model: MODELS.image }, trace: [...trace, ...image.trace] });
+      const imageModel = provider?.models.image ?? MODELS.image;
+      const imageFallback = provider?.fallbackModels?.image;
+      let image;
+      try { image = await generateImage(imageModel, messages.at(-1)?.content ?? "", provider); }
+      catch (error) {
+        if (!provider || !imageFallback) throw error;
+        image = await generateImage(imageFallback, messages.at(-1)?.content ?? "", provider);
+      }
+      return Response.json({ mode: "image", model: imageModel, routeSource: selected.routeSource, rationale: selected.rationale, content: "I generated an image from your prompt.", image: { dataUrl: image.dataUrl, model: imageModel }, trace: [...trace, ...image.trace] });
     }
 
     const textMode: Exclude<RoutedMode, "image"> = selected.mode;
-    const primary = hasAttachments ? MODELS.vision : MODELS[textMode];
-    const fallbacks = hasAttachments ? FALLBACK_MODELS.vision : FALLBACK_MODELS[textMode];
+    const primary = provider ? provider.models[textMode] : hasAttachments ? MODELS.vision : MODELS[textMode];
+    const configuredFallback = provider?.fallbackModels?.[textMode];
+    const fallbacks = provider ? (configuredFallback ? [configuredFallback] : []) : hasAttachments ? FALLBACK_MODELS.vision : FALLBACK_MODELS[textMode];
     const models = [primary, ...fallbacks];
     const promptMessages = [{ role: "user" as const, content: SYSTEM_PROMPTS[textMode] }, ...messages];
     const encoder = new TextEncoder();
@@ -79,7 +91,7 @@ export async function POST(request: Request) {
           let reasoningSeen = false;
           let finishReason: string | undefined;
           try {
-            upstream = await streamCompletion(model, promptMessages, attemptController.signal, index > 0, webSearch);
+            upstream = await streamCompletion(model, promptMessages, attemptController.signal, index > 0, webSearch, provider);
             if (index > 0) controller.enqueue(encoder.encode(ndjson({ type: "fallback", model, routeSource: selected.routeSource, trace })));
             const reader = upstream.response.body!.getReader();
             let buffer = "";

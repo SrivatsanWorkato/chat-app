@@ -1,4 +1,6 @@
-import { ChatMessage, ModelAttempt } from "@/lib/chat";
+import { ChatMessage, CustomProviderConfig, ModelAttempt } from "@/lib/chat";
+
+type ProviderConnection = Pick<CustomProviderConfig, "baseUrl" | "apiKey">;
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1";
 
@@ -35,15 +37,20 @@ export class ModelExecutionError extends Error {
   }
 }
 
-function headers() {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY is not configured");
+function connection(provider?: ProviderConnection) {
+  const apiKey = provider?.apiKey || process.env.OPENROUTER_API_KEY;
+  if (!apiKey) throw new Error(provider ? "Custom provider API key is not configured" : "OPENROUTER_API_KEY is not configured");
   return {
-    Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
-    "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
-    "X-Title": "Chat UI",
-    "X-OpenRouter-Experimental-Metadata": "enabled",
+    baseUrl: (provider?.baseUrl || OPENROUTER_URL).replace(/\/+$/, ""),
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      ...(!provider ? {
+        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+        "X-Title": "Chat UI",
+        "X-OpenRouter-Experimental-Metadata": "enabled",
+      } : {}),
+    },
   };
 }
 
@@ -76,7 +83,7 @@ function safeError(error: unknown) {
   return sanitize(error instanceof Error ? error.message : "Unknown provider error");
 }
 
-function requestBody(model: string, messages: ChatMessage[], maxTokens: number, stream: boolean, webSearch = false, responseFormat?: unknown) {
+function requestBody(model: string, messages: ChatMessage[], stream: boolean, webSearch = false, responseFormat?: unknown) {
   const hasPdf = messages.some((message) => message.attachments?.some((attachment) => attachment.mediaType === "application/pdf"));
   const disableReasoning = model === "qwen/qwen3.7-flash" || model === "inclusionai/ling-3.0-flash-fin:free";
   const plugins = [
@@ -87,7 +94,6 @@ function requestBody(model: string, messages: ChatMessage[], maxTokens: number, 
     model,
     messages: openRouterMessages(messages),
     temperature: 0.4,
-    max_tokens: maxTokens,
     stream,
     provider: { allow_fallbacks: true, sort: "latency", require_parameters: true },
     ...(disableReasoning ? { reasoning: { enabled: false, exclude: true } } : {}),
@@ -100,18 +106,19 @@ export async function completeWithFallback(
   stage: ModelAttempt["stage"],
   models: readonly string[],
   messages: ChatMessage[],
-  options?: { maxTokens?: number; responseFormat?: unknown; timeoutMs?: number },
+  options?: { responseFormat?: unknown; timeoutMs?: number; provider?: ProviderConnection },
 ) {
   const trace: ModelAttempt[] = [];
   for (const [index, model] of models.entries()) {
     const startedAt = performance.now();
     console.info("[model] attempt", { stage, model, fallback: index > 0 });
     try {
-      const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
+      const target = connection(options?.provider);
+      const response = await fetch(`${target.baseUrl}/chat/completions`, {
         method: "POST",
-        headers: headers(),
+        headers: target.headers,
         signal: AbortSignal.timeout(options?.timeoutMs ?? 8_000),
-        body: requestBody(model, messages, options?.maxTokens ?? 40, false, false, options?.responseFormat),
+        body: requestBody(model, messages, false, false, options?.responseFormat),
       });
       const result = (await response.json()) as CompletionResult;
       const choice = result.choices?.[0];
@@ -151,15 +158,14 @@ export type StreamingCompletion = {
   startedAt: number;
   generationId: string | null;
 };
-
-export async function streamCompletion(model: string, messages: ChatMessage[], signal: AbortSignal, fallback: boolean, webSearch: boolean): Promise<StreamingCompletion> {
+export async function streamCompletion(model: string, messages: ChatMessage[], signal: AbortSignal, fallback: boolean, webSearch: boolean, provider?: ProviderConnection): Promise<StreamingCompletion> {
   const startedAt = performance.now();
-  console.info("[model] attempt", { stage: "response", model, fallback, stream: true, webSearch });
-  const response = await fetch(`${OPENROUTER_URL}/chat/completions`, {
+  const target = connection(provider);
+  const response = await fetch(`${target.baseUrl}/chat/completions`, {
     method: "POST",
-    headers: headers(),
+    headers: target.headers,
     signal,
-    body: requestBody(model, messages, 800, true, webSearch),
+    body: requestBody(model, messages, true, webSearch && !provider),
   });
   if (!response.ok || !response.body) {
     const result = await response.json().catch(() => ({})) as CompletionResult;
@@ -185,12 +191,13 @@ export function logStreamResult(model: string, startedAt: number, status: "succe
   return entry;
 }
 
-export async function generateImage(model: string, prompt: string) {
+export async function generateImage(model: string, prompt: string, provider?: ProviderConnection) {
   const startedAt = performance.now();
   console.info("[model] attempt", { stage: "image", model, fallback: false });
   try {
-    const response = await fetch(`${OPENROUTER_URL}/images`, {
-      method: "POST", headers: headers(), body: JSON.stringify({ model, prompt, n: 1, aspect_ratio: "1:1" }),
+    const target = connection(provider);
+    const response = await fetch(`${target.baseUrl}/images/generations`, {
+      method: "POST", headers: target.headers, body: JSON.stringify({ model, prompt, n: 1, response_format: "b64_json", size: "1024x1024" }),
     });
     const result = (await response.json()) as ImageResult;
     const image = result.data?.[0];

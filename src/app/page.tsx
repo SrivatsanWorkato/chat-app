@@ -1,7 +1,8 @@
 "use client";
 
-import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
-import type { ChatAttachment, ChatMode, ChatResponse, MixPlan, StoredMessage } from "@/lib/chat";
+import Link from "next/link";
+import { ChangeEvent, FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from "react";
+import type { ChatAttachment, ChatMode, ChatResponse, CustomProviderConfig, MixPlan, StoredMessage } from "@/lib/chat";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -10,10 +11,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ArrowUp, Menu, Mic, Moon, MoreVertical, Pin, Plus, Sparkles, Sun, Trash2, X } from "lucide-react";
+import { ArrowUp, Check, Copy, Menu, Mic, Moon, MoreVertical, Pin, Plus, Settings2, Sparkles, Sun, Trash2, X } from "lucide-react";
+import { defaultPreferences, defaultProviderSettings, loadPreferences, loadProviderSettings, type AppPreferences, type ProviderSettings } from "@/lib/settings";
 
 type Message = StoredMessage;
 
@@ -42,6 +43,30 @@ const modeLabels: Record<ChatMode, string> = {
 };
 
 
+
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  const preRef = useRef<HTMLPreElement>(null);
+
+  async function copyCode() {
+    const code = preRef.current?.textContent?.replace(/\n$/, "") ?? "";
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_500);
+  }
+
+  return (
+    <div className="code-block">
+      <pre ref={preRef}>{children}</pre>
+      <Button type="button" variant="ghost" size="icon-sm" className="copy-code" aria-label={copied ? "Code copied" : "Copy code"} title={copied ? "Copied" : "Copy code"} onClick={copyCode}>
+        {copied ? <Check /> : <Copy />}
+      </Button>
+    </div>
+  );
+}
+
+const markdownComponents = { pre: CodeBlock };
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -56,12 +81,14 @@ export default function Home() {
   const [requestStatus, setRequestStatus] = useState("");
   const [developerMode, setDeveloperMode] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [preferences, setPreferences] = useState<AppPreferences>(defaultPreferences);
   const [mixApproval, setMixApproval] = useState<{ messageId: string; prompt: string; plan: MixPlan; taskId: string } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editedMessage, setEditedMessage] = useState("");
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [conversationTitle, setConversationTitle] = useState("");
+  const [providerSettings, setProviderSettings] = useState<ProviderSettings>(defaultProviderSettings);
 
   const loadedConversations = useRef(new Set<string>());
   const messagesCache = useRef(new Map<string, Message[]>());
@@ -161,21 +188,19 @@ export default function Home() {
   }
 
   async function syncNow(override?: { conversationId: string; snapshot: Message[] }) {
-    if (syncInFlight.current) {
-      syncPending.current = override ?? true;
-      return;
-    }
+    syncPending.current = override ?? true;
+    if (syncInFlight.current) return;
     syncInFlight.current = true;
     try {
-      for (;;) {
+      while (syncPending.current) {
         const pending = syncPending.current;
         syncPending.current = false;
-        const target = pending && pending !== true ? pending : null;
+        const target = pending === true ? null : pending;
         const conversationId = target?.conversationId ?? activeIdRef.current;
         const snapshot = target?.snapshot ?? messagesRef.current;
-        if (!conversationId || snapshot.length === 0) break;
-        const saved = await putMessages(conversationId, snapshot);
-        if (!saved || !syncPending.current) break;
+        // An explicit target may legitimately clear a conversation; an implicit sync never should.
+        if (!conversationId || (!target && snapshot.length === 0)) break;
+        if (!(await putMessages(conversationId, snapshot))) break;
       }
     } finally {
       syncInFlight.current = false;
@@ -186,19 +211,49 @@ export default function Home() {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("chat-ui-theme");
-    const initialTheme = stored === "dark" || stored === "light"
-      ? stored
-      : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    setTheme(initialTheme);
-    document.documentElement.dataset.theme = initialTheme;
+    const initialTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    queueMicrotask(() => setTheme(initialTheme));
   }, []);
+
+  useEffect(() => {
+    const nextPreferences = loadPreferences();
+    const nextProvider = loadProviderSettings();
+    queueMicrotask(() => {
+      setPreferences(nextPreferences);
+      setMode(nextPreferences.defaultMode);
+      setWebSearch(nextPreferences.defaultWebSearch);
+      setDeveloperMode(nextPreferences.diagnostics);
+      setProviderSettings(nextProvider);
+    });
+  }, []);
+
+  function customProvider(): CustomProviderConfig | undefined {
+    if (!providerSettings.enabled) return undefined;
+    return {
+      baseUrl: providerSettings.baseUrl.trim(),
+      apiKey: providerSettings.apiKey,
+      models: {
+        brain: providerSettings.models.brain.trim(),
+        blitz: providerSettings.models.blitz.trim(),
+        image: providerSettings.models.image.trim(),
+      },
+      ...(providerSettings.fallbackEnabled ? { fallbackModels: {
+        brain: providerSettings.fallbackModels?.brain?.trim(),
+        blitz: providerSettings.fallbackModels?.blitz?.trim(),
+        image: providerSettings.fallbackModels?.image?.trim(),
+      } } : {}),
+    };
+  }
+
 
   function toggleTheme() {
     const nextTheme = theme === "dark" ? "light" : "dark";
+    const nextPreferences = { ...preferences, theme: nextTheme } satisfies AppPreferences;
     setTheme(nextTheme);
+    setPreferences(nextPreferences);
     document.documentElement.dataset.theme = nextTheme;
     window.localStorage.setItem("chat-ui-theme", nextTheme);
+    window.localStorage.setItem("chat-ui-preferences", JSON.stringify(nextPreferences));
   }
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -222,7 +277,8 @@ export default function Home() {
   }
 
   async function selectConversation(conversation: Conversation) {
-    if (isResponding) return;
+    if (isResponding || conversation.id === activeConversationId) return;
+    setActiveConversationId(conversation.id);
     updateMessages(messagesCache.current.get(conversation.id) ?? []);
     setSidebarOpen(false);
     setError("");
@@ -240,23 +296,22 @@ export default function Home() {
     const remaining = conversations.filter((conversation) => conversation.id !== id);
     setConversations(remaining);
     loadedConversations.current.delete(id);
+    messagesCache.current.delete(id);
     if (id === activeConversationId) {
       const next = remaining[0];
       setActiveConversationId(next?.id ?? "");
+      updateMessages(next ? messagesCache.current.get(next.id) ?? [] : []);
       if (next && !loadedConversations.current.has(next.id)) {
-        updateMessages([]);
         try {
           await loadConversation(next.id);
         } catch {
           setError("Unable to load conversation");
         }
-      } else {
-        updateMessages(messagesCache.current.get(next.id) ?? []);
       }
     }
     try {
       const res = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Unable to delete conversation");
+      if (!res.ok && res.status !== 404) throw new Error("Unable to delete conversation");
     } catch {
       setError("Unable to delete conversation");
     }
@@ -292,7 +347,7 @@ export default function Home() {
     setRequestStatus(plan ? "Generating approved image" : "Planning workflow");
     setIsResponding(true);
     try {
-      const response = await fetch("/api/mix", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, plan, approveImageTaskId }) });
+      const response = await fetch("/api/mix", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, plan, approveImageTaskId, provider: customProvider() }) });
       if (!response.ok || !response.body) {
         const result = await response.json() as { error?: string };
         throw new Error(result.error ?? "Mix failed");
@@ -362,8 +417,9 @@ export default function Home() {
     }
 
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content, attachments };
-    const recentMessages = messages.slice(-11);
-    const requestMessages = [...recentMessages.map(({ role, content: messageContent }) => ({
+    const history = messagesRef.current;
+    const nextMessages = [...history, userMessage];
+    const requestMessages = [...history.slice(-11).map(({ role, content: messageContent }) => ({
       role,
       content: messageContent,
     })), {
@@ -371,9 +427,9 @@ export default function Home() {
       content: userMessage.content,
       attachments: userMessage.attachments,
     }];
-    updateMessages((current) => [...current, userMessage]);
+    updateMessages(nextMessages);
     setInput("");
-    void syncNow({ conversationId, snapshot: [...messages, userMessage] });
+    void syncNow({ conversationId, snapshot: nextMessages });
     setConversations((current) => current.map((conversation) => conversation.id === conversationId
       ? { ...conversation, title: conversation.title === "New chat" ? content.slice(0, 44) || conversation.title : conversation.title }
       : conversation));
@@ -390,7 +446,7 @@ export default function Home() {
       const request = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: requestedMode, messages: requestMessages, webSearch }),
+        body: JSON.stringify({ mode: requestedMode, messages: requestMessages, webSearch, provider: customProvider() }),
       });
       if (!request.ok || request.headers.get("content-type")?.includes("application/json")) {
         const result = (await request.json()) as Partial<ChatResponse> & { error?: string };
@@ -477,10 +533,11 @@ export default function Home() {
     submitMessage();
   }
   function resendEditedMessage(messageId: string) {
-    const index = messages.findIndex((message) => message.id === messageId && message.role === "user");
+    const current = messagesRef.current;
+    const index = current.findIndex((message) => message.id === messageId && message.role === "user");
     const content = editedMessage.trim();
     if (index < 0 || !content || isResponding) return;
-    updateMessages(messages.slice(0, index));
+    updateMessages(current.slice(0, index));
     setEditingMessageId(null);
     setEditedMessage("");
     submitMessage(content, mode);
@@ -492,15 +549,16 @@ export default function Home() {
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (preferences.enterToSend && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       submitMessage();
     }
   }
 
   function retryMessage(messageId: string, nextMode: Exclude<ChatMode, "auto">) {
-    const index = messages.findIndex((message) => message.id === messageId);
-    const precedingUser = index >= 0 ? messages.slice(0, index).reverse().find((message) => message.role === "user") : undefined;
+    const current = messagesRef.current;
+    const index = current.findIndex((message) => message.id === messageId);
+    const precedingUser = index >= 0 ? current.slice(0, index).reverse().find((message) => message.role === "user") : undefined;
     if (!precedingUser) return;
     setMode(nextMode);
     submitMessage(precedingUser.content, nextMode);
@@ -532,13 +590,11 @@ export default function Home() {
                   <Button variant="ghost" className="history-item" onClick={() => selectConversation(conversation)} disabled={isResponding}>{conversation.title}</Button>
                   <div className="history-menu-wrap">
                     <Button variant="ghost" size="icon-sm" className="history-menu-trigger" onClick={() => setConversationMenuId((current) => current === conversation.id ? null : conversation.id)} disabled={isResponding} aria-label={`Actions for ${conversation.title}`}><MoreVertical /></Button>
-                    {conversationMenuId === conversation.id && (
-                      <div className="history-menu">
-                        <button onClick={() => startRenamingConversation(conversation)}>Rename</button>
-                        <button onClick={() => togglePinnedConversation(conversation.id)}><Pin />{conversation.pinned ? "Unpin" : "Pin"}</button>
-                        <button className="danger" onClick={() => { setConversationMenuId(null); deleteConversation(conversation.id); }}><Trash2 />Delete</button>
-                      </div>
-                    )}
+                    {conversationMenuId === conversation.id && <div className="history-menu">
+                      <button onClick={() => startRenamingConversation(conversation)}>Rename</button>
+                      <button onClick={() => togglePinnedConversation(conversation.id)}><Pin />{conversation.pinned ? "Unpin" : "Pin"}</button>
+                      <button className="danger" onClick={() => { setConversationMenuId(null); deleteConversation(conversation.id); }}><Trash2 />Delete</button>
+                    </div>}
                   </div>
                 </>
               )}
@@ -556,25 +612,13 @@ export default function Home() {
         <header className="topbar">
           <Button variant="ghost" size="icon" className="icon-button menu-button" aria-label="Open sidebar" onClick={() => setSidebarOpen(true)}><Menu /></Button>
           <Select value={mode} onValueChange={(value) => setMode(value as ChatMode)} disabled={isResponding}>
-            <SelectTrigger className="mode-picker" aria-label="Assistant mode">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(Object.keys(modeLabels) as ChatMode[]).map((option) => (
-                <SelectItem key={option} value={option}>{modeLabels[option]}</SelectItem>
-              ))}
-            </SelectContent>
+            <SelectTrigger className="mode-picker" aria-label="Assistant mode"><SelectValue /></SelectTrigger>
+            <SelectContent>{(Object.keys(modeLabels) as ChatMode[]).map((option) => <SelectItem key={option} value={option}>{modeLabels[option]}</SelectItem>)}</SelectContent>
           </Select>
           <div className="top-actions">
-            <Button variant="ghost" size="icon" className="icon-button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={toggleTheme}>
-              {theme === "dark" ? <Sun /> : <Moon />}
-            </Button>
-            <label className="developer-toggle">
-              <Switch size="sm" checked={developerMode} onCheckedChange={setDeveloperMode} />
-              Diagnostics
-            </label>
+            <Button variant="ghost" size="icon" className="icon-button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={toggleTheme}>{theme === "dark" ? <Sun /> : <Moon />}</Button>
             <Button variant="outline" className="share-button">Share</Button>
-            <Button variant="ghost" size="icon" className="icon-button" aria-label="More options">•••</Button>
+            <Button variant="ghost" size="icon" className="icon-button" aria-label="Settings" render={<Link href="/settings" />}><Settings2 /></Button>
           </div>
         </header>
 
@@ -641,7 +685,7 @@ export default function Home() {
                                   <strong>{task.title}</strong><Badge variant="outline">{task.capability}</Badge>
                                 </div>
                                 {task.model && <code>{task.model}</code>}
-                                {task.output && <div className="mix-output"><ReactMarkdown remarkPlugins={[remarkGfm]}>{task.output}</ReactMarkdown></div>}
+                                {task.output && <div className="mix-output"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{task.output}</ReactMarkdown></div>}
                                 {task.image && <figure className="generated-image-wrap"><img className="generated-image" src={task.image.dataUrl} alt={task.title} /><a className="image-download" href={task.image.dataUrl} download={`${task.id}.png`}>Download</a></figure>}
                                 {task.error && <Alert variant="destructive" className="mix-error"><AlertDescription>{task.error}</AlertDescription></Alert>}
                                 {task.status === "approval_required" && mixApproval?.taskId === task.id && (
@@ -672,7 +716,7 @@ export default function Home() {
                       </div>
                     ) : (
                       <div className="message-bubble">
-                        {message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}
+                        {message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown> : message.content}
                       </div>
                     )}
                     {message.role === "user" && editingMessageId !== message.id && (
