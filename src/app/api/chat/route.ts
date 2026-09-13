@@ -53,6 +53,8 @@ export async function POST(request: Request) {
     const body = (await request.json()) as Partial<ChatRequest>;
     if (!CHAT_MODES.includes(body.mode as ChatRequest["mode"]) || body.mode === "mix" || typeof body.webSearch !== "boolean" || !validMessages(body.messages)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
     const provider = parseCustomProvider(body.provider);
+    const systemPrompt = typeof body.systemPrompt === "string" && body.systemPrompt.trim() ? body.systemPrompt.trim() : undefined;
+    if (body.systemPrompt !== undefined && (systemPrompt === undefined || systemPrompt.length > 2000)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
     const messages = body.messages;
     const webSearch = provider ? false : body.webSearch;
     const selected: { mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "manual" | "rule" | "model" } = body.mode === "auto" ? await decideRoute(messages, provider) : { mode: body.mode as RoutedMode, rationale: `You selected ${body.mode} mode.`, trace: [], routeSource: "manual" };
@@ -76,7 +78,8 @@ export async function POST(request: Request) {
     const configuredFallback = provider?.fallbackModels?.[textMode];
     const fallbacks = provider ? (configuredFallback ? [configuredFallback] : []) : hasAttachments ? FALLBACK_MODELS.vision : FALLBACK_MODELS[textMode];
     const models = [primary, ...fallbacks];
-    const promptMessages = [{ role: "user" as const, content: SYSTEM_PROMPTS[textMode] }, ...messages];
+    const persona = systemPrompt ? `${systemPrompt}\n\n${SYSTEM_PROMPTS[textMode]}` : SYSTEM_PROMPTS[textMode];
+    const promptMessages = [{ role: "user" as const, content: persona }, ...messages];
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     const stream = new ReadableStream({

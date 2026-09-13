@@ -13,8 +13,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ArrowUp, Check, Copy, Menu, Mic, Moon, MoreVertical, Pin, Plus, Settings2, Sparkles, Sun, Trash2, X } from "lucide-react";
-import { defaultPreferences, defaultProviderSettings, loadPreferences, loadProviderSettings, type AppPreferences, type ProviderSettings } from "@/lib/settings";
+import { ArrowUp, Check, Copy, Globe, Menu, Moon, MoreVertical, Paperclip, Pin, Plus, Settings2, Sparkles, Sun, Trash2, X } from "lucide-react";
+import { defaultPreferences, emptyProviderStore, loadActivePresetId, loadPreferences, loadPresets, loadProviderStore, saveActivePresetId, saveProviderStore, type AppPreferences, type ModelPreset, type ProviderStore } from "@/lib/settings";
 
 type Message = StoredMessage;
 
@@ -88,7 +88,9 @@ export default function Home() {
   const [conversationMenuId, setConversationMenuId] = useState<string | null>(null);
   const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
   const [conversationTitle, setConversationTitle] = useState("");
-  const [providerSettings, setProviderSettings] = useState<ProviderSettings>(defaultProviderSettings);
+  const [providerStore, setProviderStore] = useState<ProviderStore>(emptyProviderStore);
+  const [presets, setPresets] = useState<ModelPreset[]>([]);
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
 
   const loadedConversations = useRef(new Set<string>());
   const messagesCache = useRef(new Map<string, Message[]>());
@@ -217,32 +219,52 @@ export default function Home() {
 
   useEffect(() => {
     const nextPreferences = loadPreferences();
-    const nextProvider = loadProviderSettings();
+    const nextProviderStore = loadProviderStore();
+    const nextPresets = loadPresets();
+    const nextActivePresetId = loadActivePresetId();
     queueMicrotask(() => {
       setPreferences(nextPreferences);
       setMode(nextPreferences.defaultMode);
       setWebSearch(nextPreferences.defaultWebSearch);
       setDeveloperMode(nextPreferences.diagnostics);
-      setProviderSettings(nextProvider);
+      setProviderStore(nextProviderStore);
+      setPresets(nextPresets);
+      const activePreset = nextPresets.find((preset) => preset.id === nextActivePresetId);
+      setActivePresetId(activePreset ? nextActivePresetId : null);
+      if (activePreset) setMode(activePreset.mode);
     });
   }, []);
 
-  function customProvider(): CustomProviderConfig | undefined {
-    if (!providerSettings.enabled) return undefined;
+  function customProvider(profileId?: string): CustomProviderConfig | undefined {
+    const profile = profileId
+      ? providerStore.providers.find((provider) => provider.id === profileId)
+      : providerStore.providers.find((provider) => provider.id === providerStore.activeId);
+    if (!profile) return undefined;
     return {
-      baseUrl: providerSettings.baseUrl.trim(),
-      apiKey: providerSettings.apiKey,
+      baseUrl: profile.baseUrl.trim(),
+      apiKey: profile.apiKey,
       models: {
-        brain: providerSettings.models.brain.trim(),
-        blitz: providerSettings.models.blitz.trim(),
-        image: providerSettings.models.image.trim(),
+        brain: profile.models.brain.trim(),
+        blitz: profile.models.blitz.trim(),
+        image: profile.models.image.trim(),
       },
-      ...(providerSettings.fallbackEnabled ? { fallbackModels: {
-        brain: providerSettings.fallbackModels?.brain?.trim(),
-        blitz: providerSettings.fallbackModels?.blitz?.trim(),
-        image: providerSettings.fallbackModels?.image?.trim(),
+      ...(profile.fallbackEnabled ? { fallbackModels: {
+        brain: profile.fallbackModels.brain.trim(),
+        blitz: profile.fallbackModels.blitz.trim(),
+        image: profile.fallbackModels.image.trim(),
       } } : {}),
     };
+  }
+
+  function selectPreset(preset: ModelPreset) {
+    setActivePresetId(preset.id);
+    setMode(preset.mode);
+    saveActivePresetId(preset.id);
+  }
+
+  function clearPreset() {
+    setActivePresetId(null);
+    saveActivePresetId(null);
   }
 
 
@@ -400,6 +422,13 @@ export default function Home() {
   async function submitMessage(text = input, requestedMode: ChatMode = mode) {
     const content = text.trim();
     if ((!content && attachments.length === 0) || isResponding) return;
+    const activePreset = activePresetId ? presets.find((preset) => preset.id === activePresetId) : undefined;
+    if (activePreset && activePreset.provider !== "builtin" && !providerStore.providers.some((provider) => provider.id === activePreset.provider)) {
+      setError("This preset's provider was deleted. Pick a different preset or active provider in Settings.");
+      return;
+    }
+    const requestProvider = activePreset ? (activePreset.provider === "builtin" ? undefined : customProvider(activePreset.provider)) : customProvider();
+    const presetName = activePreset?.name;
     let conversationId = activeConversationId;
     if (!conversationId) {
       try {
@@ -439,19 +468,19 @@ export default function Home() {
     }
     setAttachments([]);
     setError("");
-    setRequestStatus(requestedMode === "auto" ? "Choosing the best model" : webSearch ? "Searching the web" : `${modeLabels[requestedMode]} is thinking`);
+    setRequestStatus(requestedMode === "auto" ? "Choosing the best model" : webSearch ? "Searching the web" : `${presetName ?? modeLabels[requestedMode]} is thinking`);
     setIsResponding(true);
 
     try {
       const request = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: requestedMode, messages: requestMessages, webSearch, provider: customProvider() }),
+        body: JSON.stringify({ mode: requestedMode, messages: requestMessages, webSearch, provider: requestProvider, ...(activePreset ? { systemPrompt: activePreset.systemPrompt } : {}) }),
       });
       if (!request.ok || request.headers.get("content-type")?.includes("application/json")) {
         const result = (await request.json()) as Partial<ChatResponse> & { error?: string };
         if (!request.ok) throw new Error(result.error ?? "The request failed");
-        updateMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", content: result.content ?? "", route: { mode: result.mode!, model: result.model!, rationale: result.rationale!, trace: result.trace ?? [] }, image: result.image }]);
+        updateMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", content: result.content ?? "", route: { mode: result.mode!, model: result.model!, rationale: result.rationale!, trace: result.trace ?? [], ...(presetName ? { preset: presetName } : {}) }, image: result.image }]);
         return;
       }
 
@@ -471,8 +500,8 @@ export default function Home() {
           const event = JSON.parse(line) as { type: string; content?: string; mode?: ChatResponse["mode"]; model?: string; fallbackModels?: string[]; routeSource?: ChatResponse["routeSource"]; rationale?: string; webSearch?: boolean; status?: string; trace?: ChatResponse["trace"]; error?: string };
           if (event.type === "meta") {
             assistantAdded = true;
-            setRequestStatus(event.webSearch ? "Searching the web" : `${modeLabels[event.mode!]} is thinking`);
-            updateMessages((current) => [...current, { id: assistantId, role: "assistant", content: "", route: { mode: event.mode!, model: event.model!, fallbackModels: event.fallbackModels, routeSource: event.routeSource, rationale: event.rationale!, webSearch: event.webSearch, trace: event.trace ?? [] } }]);
+            setRequestStatus(event.webSearch ? "Searching the web" : `${presetName ?? modeLabels[event.mode!]} is thinking`);
+            updateMessages((current) => [...current, { id: assistantId, role: "assistant", content: "", route: { mode: event.mode!, model: event.model!, fallbackModels: event.fallbackModels, routeSource: event.routeSource, rationale: event.rationale!, webSearch: event.webSearch, trace: event.trace ?? [], ...(presetName ? { preset: presetName } : {}) } }]);
           } else if (event.type === "status" && event.status) {
             setRequestStatus(event.status);
           } else if (event.type === "fallback") {
@@ -564,6 +593,11 @@ export default function Home() {
     submitMessage(precedingUser.content, nextMode);
   }
 
+  const selectedPreset = activePresetId ? presets.find((preset) => preset.id === activePresetId) : undefined;
+  const providerChoice = selectedPreset ? selectedPreset.provider : providerStore.activeId ?? "builtin";
+  const providerPinned = Boolean(selectedPreset);
+  const providerLabel = (value: string | null) => !value || value === "builtin" ? "Built-in (OpenRouter)" : providerStore.providers.find((provider) => provider.id === value)?.name ?? "Unknown provider";
+
   return (
     <div className="app-shell">
       {sidebarOpen && <Button variant="ghost" className="sidebar-scrim" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)} />}
@@ -611,14 +645,14 @@ export default function Home() {
       <main className="chat-main">
         <header className="topbar">
           <Button variant="ghost" size="icon" className="icon-button menu-button" aria-label="Open sidebar" onClick={() => setSidebarOpen(true)}><Menu /></Button>
-          <Select value={mode} onValueChange={(value) => setMode(value as ChatMode)} disabled={isResponding}>
+          <Select value={mode.toUpperCase()} onValueChange={(value) => setMode(value as ChatMode)} disabled={isResponding}>
             <SelectTrigger className="mode-picker" aria-label="Assistant mode"><SelectValue /></SelectTrigger>
             <SelectContent>{(Object.keys(modeLabels) as ChatMode[]).map((option) => <SelectItem key={option} value={option}>{modeLabels[option]}</SelectItem>)}</SelectContent>
           </Select>
           <div className="top-actions">
             <Button variant="ghost" size="icon" className="icon-button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={toggleTheme}>{theme === "dark" ? <Sun /> : <Moon />}</Button>
             <Button variant="outline" className="share-button">Share</Button>
-            <Button variant="ghost" size="icon" className="icon-button" aria-label="Settings" render={<Link href="/settings" />}><Settings2 /></Button>
+            <Button variant="ghost" size="icon" className="icon-button" aria-label="Settings" nativeButton={false} render={<Link href="/settings" />}><Settings2 /></Button>
           </div>
         </header>
 
@@ -653,7 +687,7 @@ export default function Home() {
                       <div className="route-card">
                         <details className={`route-summary route-${message.route.mode}`}>
                           <summary>
-                            <Badge variant="secondary">{modeLabels[message.route.mode]}</Badge>
+                            <Badge variant="secondary">{message.route.preset ?? modeLabels[message.route.mode]}</Badge>
                             {message.route.webSearch && <Badge variant="outline">web</Badge>}
                           </summary>
                           <div><span>Model</span><code>{message.route.model}</code></div>
@@ -763,10 +797,28 @@ export default function Home() {
         <div className="composer-area">
           <div className="mode-strip" aria-label="Model modes">
             {(Object.keys(modeLabels) as ChatMode[]).map((option) => (
-              <Button variant={mode === option ? "default" : "outline"} size="sm" key={option} className={mode === option ? "active" : ""} onClick={() => setMode(option)} disabled={isResponding}>
+              <Button variant={mode === option && !activePresetId ? "default" : "outline"} size="sm" key={option} className={mode === option && !activePresetId ? "active" : ""} onClick={() => { setMode(option); clearPreset(); }} disabled={isResponding}>
                 {modeLabels[option]}
               </Button>
             ))}
+          <Select
+            value={providerChoice}
+            onValueChange={(value) => {
+              if (value === null || providerPinned) return;
+              const next = { ...providerStore, activeId: value === "builtin" ? null : value };
+              setProviderStore(next);
+              saveProviderStore(next);
+            }}
+            disabled={isResponding || providerPinned}
+          >
+            <SelectTrigger className={`provider-picker ${providerPinned ? "pinned" : ""}`} aria-label="Provider" title={providerPinned ? "Provider pinned by the active preset" : "Provider for new messages"}>
+              <SelectValue>{providerLabel}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="builtin">Built-in (OpenRouter)</SelectItem>
+              {providerStore.providers.map((provider) => <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
           </div>
           {attachments.length > 0 && (
             <div className="attachment-tray">
@@ -784,26 +836,49 @@ export default function Home() {
           <form className="composer" onSubmit={onSubmit}>
             <Textarea
               aria-label="Message"
-              placeholder="Message Chat UI"
+              placeholder="Message AI Models..."
               rows={1}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={onKeyDown}
             />
             <div className="composer-actions">
+              <input ref={fileInputRef} className="file-input" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" multiple onChange={onFilesSelected} />
+              <Tooltip>
+                <TooltipTrigger render={<Button type="button" variant="ghost" size="icon" className="composer-icon" aria-label="Attach images or PDFs" onClick={() => fileInputRef.current?.click()} disabled={isResponding || attachments.length >= 4}><Paperclip /></Button>}>
+                  <Globe />
+                </TooltipTrigger>
+                <TooltipContent>Attachment</TooltipContent>
+              </Tooltip>
               <Tooltip>
                 <TooltipTrigger render={<Button type="button" variant="ghost" size="icon" className={`web-toggle ${webSearch ? "active" : ""}`} aria-label="Search web" aria-pressed={webSearch} onClick={() => setWebSearch((enabled) => !enabled)} disabled={isResponding} />}>
-                  <span aria-hidden="true">◎</span>
+                  <Globe />
                 </TooltipTrigger>
                 <TooltipContent>Search web</TooltipContent>
               </Tooltip>
-              <input ref={fileInputRef} className="file-input" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" multiple onChange={onFilesSelected} />
-              <Button type="button" variant="ghost" size="icon" className="composer-icon" aria-label="Attach images or PDFs" onClick={() => fileInputRef.current?.click()} disabled={isResponding || attachments.length >= 4}><Plus /></Button>
-              <Button type="button" variant="ghost" size="icon" className="composer-icon" aria-label="Voice input"><Mic /></Button>
+              {presets.length > 0 && (
+                <Select
+                  value={activePresetId ?? "none"}
+                  onValueChange={(value) => {
+                    if (value === null) return;
+                    if (value === "none") { clearPreset(); return; }
+                    const preset = presets.find((item) => item.id === value);
+                    if (preset) selectPreset(preset);
+                  }}
+                  disabled={isResponding}
+                >
+                  <SelectTrigger className={`preset-picker ${activePresetId ? "active" : ""}`} aria-label="Model presets" title={selectedPreset ? `Preset: ${selectedPreset.name}` : "Model presets"}>
+                    {selectedPreset ? <span className="preset-picker-name">{selectedPreset.name}</span> : <Plus />}
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No preset</SelectItem>
+                    {presets.map((preset) => <SelectItem key={preset.id} value={preset.id}>{preset.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              )}
               <Button type="submit" size="icon" className="send-button" aria-label="Send message" disabled={(!input.trim() && attachments.length === 0) || isResponding}><ArrowUp /></Button>
             </div>
           </form>
-          <p className="disclaimer">Chat UI can make mistakes. Check important info.</p>
         </div>
       </main>
     </div>

@@ -89,6 +89,7 @@ export type ChatRequest = {
   mixPlan?: MixPlan;
   approveImageTaskId?: string;
   provider?: CustomProviderConfig;
+  systemPrompt?: string;
 };
 
 export type ModelAttempt = {
@@ -125,8 +126,7 @@ export const FALLBACK_MODELS = {
   brain: ["upstage/solar-pro4"],
   vision: [],
 } as const;
-
-export type MessageRoute = Pick<ChatResponse, "mode" | "model" | "rationale" | "trace" | "routeSource"> & { fallbackModels?: string[]; webSearch?: boolean };
+export type MessageRoute = Pick<ChatResponse, "mode" | "model" | "rationale" | "trace" | "routeSource"> & { fallbackModels?: string[]; webSearch?: boolean; preset?: string };
 
 export type StoredMessage = {
   id: string;

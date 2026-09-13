@@ -35,8 +35,9 @@ function validAttachments(value: unknown): boolean {
 function validRoute(value: unknown): boolean {
   if (value === undefined || value === null) return true;
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const route = value as { mode?: unknown; model?: unknown; rationale?: unknown; trace?: unknown; fallbackModels?: unknown };
+  const route = value as { mode?: unknown; model?: unknown; rationale?: unknown; trace?: unknown; fallbackModels?: unknown; preset?: unknown };
   if (typeof route.mode !== "string" || typeof route.model !== "string" || route.model.length > 200 || typeof route.rationale !== "string" || route.rationale.length > 2_000) return false;
+  if (route.preset !== undefined && (typeof route.preset !== "string" || route.preset.length > 60)) return false;
   if (!Array.isArray(route.trace) || route.trace.length > 50) return false;
   if (route.fallbackModels !== undefined && (!Array.isArray(route.fallbackModels) || route.fallbackModels.some((model) => typeof model !== "string" || (model as string).length > 200))) return false;
   return true;
