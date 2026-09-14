@@ -9,7 +9,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -645,10 +645,6 @@ export default function Home() {
       <main className="chat-main">
         <header className="topbar">
           <Button variant="ghost" size="icon" className="icon-button menu-button" aria-label="Open sidebar" onClick={() => setSidebarOpen(true)}><Menu /></Button>
-          <Select value={mode.toUpperCase()} onValueChange={(value) => setMode(value as ChatMode)} disabled={isResponding}>
-            <SelectTrigger className="mode-picker" aria-label="Assistant mode"><SelectValue /></SelectTrigger>
-            <SelectContent>{(Object.keys(modeLabels) as ChatMode[]).map((option) => <SelectItem key={option} value={option}>{modeLabels[option]}</SelectItem>)}</SelectContent>
-          </Select>
           <div className="top-actions">
             <Button variant="ghost" size="icon" className="icon-button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={toggleTheme}>{theme === "dark" ? <Sun /> : <Moon />}</Button>
             <Button variant="outline" className="share-button">Share</Button>
@@ -705,31 +701,43 @@ export default function Home() {
                       </div>
                     )}
                     {message.mix && (
-                      <Card className="mix-workflow">
-                        <CardHeader>
-                          <div><Badge variant="secondary">Mix plan</Badge><span>{message.mix.completed ? "Complete" : "In progress"}</span></div>
-                          <CardTitle>{message.mix.plan.goal}</CardTitle>
-                        </CardHeader>
-                        <CardContent>
-                          <ol>
-                            {message.mix.tasks.map((task) => (
-                              <li key={task.id} className={`mix-task ${task.status}`}>
-                                <div className="mix-task-head">
-                                  <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : task.status === "approval_required" ? "$" : "○"}</span>
-                                  <strong>{task.title}</strong><Badge variant="outline">{task.capability}</Badge>
+                      <div className="mix-workflow">
+                        <div className="mix-workflow-header"><Badge variant="secondary">Mix plan</Badge><span>{message.mix.completed ? "Complete" : "In progress"}</span></div>
+                        <h2>{message.mix.plan.goal}</h2>
+                        <ol className="mix-plan">
+                          {message.mix.tasks.map((task) => (
+                            <li key={task.id} className={`mix-task ${task.status}`}>
+                              <div className="mix-task-head">
+                                <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : task.status === "approval_required" ? "$" : "○"}</span>
+                                <strong>{task.title}</strong>
+                                <Badge variant="outline">{task.capability}</Badge>
+                              </div>
+                              {task.model && <span className="mix-model">{task.model}</span>}
+                              {task.status === "approval_required" && mixApproval?.taskId === task.id && <Button className="approve-image" onClick={() => { const approval = mixApproval; setMixApproval(null); runMix(approval.prompt, approval.plan, approval.taskId, approval.messageId, activeConversationId); }} disabled={isResponding}>Generate image · ~$0.019</Button>}
+                            </li>
+                          ))}
+                        </ol>
+                        {message.mix.tasks.some((task) => task.output || task.image || task.error) && (
+                          <div className="mix-replies">
+                            <div className="mix-replies-label">Results</div>
+                            {message.mix.tasks.map((task) => task.output || task.image || task.error ? (
+                              <div key={task.id} className={`mix-reply ${task.status}`}>
+                                <div className="mix-reply-head">
+                                  <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : "○"}</span>
+                                  <strong>{task.title}</strong>
+                                  <Badge variant="outline">{task.capability}</Badge>
                                 </div>
-                                {task.model && <code>{task.model}</code>}
-                                {task.output && <div className="mix-output"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{task.output}</ReactMarkdown></div>}
-                                {task.image && <figure className="generated-image-wrap"><img className="generated-image" src={task.image.dataUrl} alt={task.title} /><a className="image-download" href={task.image.dataUrl} download={`${task.id}.png`}>Download</a></figure>}
+                                {task.capability === "image" && task.image ? (
+                                  <figure className="generated-image-wrap"><img className="generated-image" src={task.image.dataUrl} alt={task.title} /><a className="image-download" href={task.image.dataUrl} download={`${task.id}.png`}>Download</a></figure>
+                                ) : task.output ? (
+                                  <div className="mix-output"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{task.output}</ReactMarkdown></div>
+                                ) : null}
                                 {task.error && <Alert variant="destructive" className="mix-error"><AlertDescription>{task.error}</AlertDescription></Alert>}
-                                {task.status === "approval_required" && mixApproval?.taskId === task.id && (
-                                  <Button className="approve-image" onClick={() => { const approval = mixApproval; setMixApproval(null); runMix(approval.prompt, approval.plan, approval.taskId, approval.messageId, activeConversationId); }} disabled={isResponding}>Generate image · ~$0.019</Button>
-                                )}
-                              </li>
-                            ))}
-                          </ol>
-                        </CardContent>
-                      </Card>
+                              </div>
+                            ) : null)}
+                          </div>
+                        )}
+                      </div>
                     )}
                     {message.attachments?.length ? (
                       <div className="message-attachments">

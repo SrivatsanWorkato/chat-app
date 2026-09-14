@@ -179,11 +179,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .model-picker { padding: 8px 10px; border: 0; border-radius: 9px; background: transparent; color: #4d4d4d; font-size: 18px; font-weight: 600; cursor: pointer; }
 .model-picker:hover { background: #f4f4f4; }
 .model-picker span { margin-left: 3px; color: #777; font-size: 14px; }
-.top-actions { display: flex; align-items: center; gap: 4px; }
+.top-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .share-button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 20px; background: white; font-size: 13px; font-weight: 500; cursor: pointer; }
 .share-button:hover { background: #f7f7f7; }
-.settings-page { min-height: 100vh; background: color-mix(in srgb, var(--background) 97%, var(--foreground)); color: var(--foreground); }
-.settings-page-header { position: sticky; z-index: 10; top: 0; display: grid; grid-template-columns: 42px 1fr auto; align-items: center; gap: 16px; min-height: 82px; padding: 14px max(24px, calc((100vw - 1120px) / 2)); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--background) 94%, transparent); backdrop-filter: blur(16px); }
+.settings-page { min-height: 100vh; background: var(--background); color: var(--foreground); }
+.settings-page-header { position: sticky; z-index: 10; top: 0; display: grid; grid-template-columns: 42px 1fr auto; align-items: center; gap: 16px; min-height: 82px; padding: 14px max(24px, calc((100vw - 1120px) / 2)); border-bottom: 1px solid var(--line); background: var(--background); }
 .settings-page-header h1 { margin: 0; font-size: 24px; letter-spacing: -.4px; }
 .settings-page-header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
 .settings-back { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; color: var(--foreground); }
@@ -296,10 +296,22 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .mix-output :not(pre) > code { padding: .15em .38em; border-radius: 6px; background: color-mix(in srgb, var(--background) 90%, var(--foreground)); font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: .9em; overflow-wrap: anywhere; }
 .assistant .message-bubble a,
 .mix-output a { color: var(--accent); overflow-wrap: anywhere; }
-.mix-workflow { width: min(100%, 650px); margin: 4px 0 14px; padding: 0; border: 1px solid var(--line); border-radius: 16px; background: color-mix(in srgb, var(--background) 97%, var(--foreground)); }
-.mix-workflow [data-slot="card-header"] > div { display: flex; justify-content: space-between; align-items: center; color: var(--muted-foreground); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-.mix-workflow [data-slot="card-title"] { margin-top: 9px; font-size: 16px; }
-.mix-workflow [data-slot="card-content"] { padding-top: 0; }
+.mix-workflow-header { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+.mix-workflow > h2 { margin: 9px 0 14px; font-size: 14px; line-height: 1.45; color: color-mix(in srgb, var(--foreground) 66%, var(--muted)); font-weight: 550; }
+.mix-plan { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.mix-task { min-width: 0; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; }
+.mix-task.completed { background: transparent; }
+.mix-task-head { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.mix-task-head strong { min-width: 0; flex: 1; font-size: 12px; line-height: 1.35; color: color-mix(in srgb, var(--foreground) 78%, var(--muted)); font-weight: 550; }
+.mix-task.completed .mix-task-head strong { color: var(--muted); }
+.mix-task-head [data-slot="badge"] { flex: 0 0 auto; }
+.mix-model { display: block; margin: 4px 0 0 25px; overflow: hidden; color: var(--muted); font-family: var(--font-geist-mono), monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.mix-status { width: 14px; flex: 0 0 auto; color: var(--muted); text-align: center; }
+.mix-task.running .mix-status, .mix-reply.running .mix-status { color: var(--accent); }
+.mix-task.completed .mix-status, .mix-reply.completed .mix-status { color: #14804a; }
+.mix-task.failed .mix-status, .mix-reply.failed .mix-status { color: #b42318; }
+.mix-output { min-width: 0; overflow-wrap: anywhere; }
+.mix-output table { display: block; max-width: 100%; overflow-x: auto; }
 .assistant .message-bubble table { width: 100%; display: block; margin: 1em 0; overflow-x: auto; border-collapse: collapse; font-size: .92em; }
 .assistant .message-bubble th,
 .assistant .message-bubble td { padding: 8px 10px; border: 1px solid var(--line); text-align: left; }
@@ -307,7 +319,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .message-content { min-width: 0; max-width: min(78%, 650px); }
 .message-content .message-bubble { max-width: none; }
 .user .message-content { display: flex; justify-content: flex-end; }
-.mix-task-head [data-slot="badge"] { font-size: 9px; text-transform: uppercase; }
+.mix-task-head [data-slot="badge"], .mix-reply-head [data-slot="badge"] { font-size: 9px; text-transform: uppercase; }
 .message-row.user:hover .edit-message,
 .edit-message:focus-visible { opacity: 1; }
 .edit-message:hover { background: color-mix(in srgb, var(--background) 88%, var(--foreground)); }
@@ -362,24 +374,16 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .generated-image { display: block; width: 100%; height: auto; border: 0; }
 .image-download { position: absolute; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 6px; padding: 8px 11px; border: 1px solid rgba(255,255,255,.28); border-radius: 20px; background: rgba(20,20,20,.78); color: white; backdrop-filter: blur(8px); font-size: 12px; font-weight: 600; text-decoration: none; opacity: 0; transform: translateY(4px); transition: opacity .15s ease, transform .15s ease, background .15s ease; }
 .mix-workflow { width: min(100%, 650px); margin: 4px 0 14px; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: color-mix(in srgb, var(--background) 97%, var(--foreground)); }
-.mix-workflow > header { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-.mix-workflow > header strong { color: #6851b7; }
-.mix-workflow h3 { margin: 9px 0 14px; font-size: 16px; }
-.mix-workflow ol { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
-.mix-task { padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--background); }
-.mix-task.running { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
-.mix-task.completed { background: color-mix(in srgb, var(--background) 96%, #1fa36b); }
-.mix-task.failed { border-color: #d89a94; }
-.mix-task-head { display: flex; align-items: center; gap: 8px; }
-.mix-task-head strong { flex: 1; font-size: 13px; }
-.mix-task-head em { padding: 2px 6px; border-radius: 8px; background: #eee9ff; color: #6851b7; font-size: 9px; font-style: normal; text-transform: uppercase; }
-.mix-status { width: 16px; color: var(--accent); text-align: center; }
-.mix-task > code { display: block; margin: 6px 0 0 24px; color: var(--muted); font-size: 9px; }
-.mix-output { margin: 10px 0 0 24px; font-size: 13px; line-height: 1.6; }
 .mix-output > :first-child { margin-top: 0; }
 .mix-output > :last-child { margin-bottom: 0; }
-.mix-error { margin: 8px 0 0 24px; color: #b42318; font-size: 11px; }
-.approve-image { margin: 10px 0 0 24px; padding: 7px 11px; border: 0; border-radius: 10px; background: #202020; color: white; font-size: 11px; cursor: pointer; }
+.mix-replies { min-width: 0; display: grid; gap: 16px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.mix-replies-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
+.mix-reply { min-width: 0; }
+.mix-reply-head { display: flex; min-width: 0; align-items: center; gap: 9px; margin-bottom: 7px; }
+.mix-reply-head strong { min-width: 0; flex: 1; font-size: 13px; font-weight: 600; color: var(--foreground); }
+.mix-reply .mix-output { font-size: 13px; line-height: 1.6; }
+.mix-error { margin: 8px 0 0; color: #b42318; font-size: 11px; }
+.approve-image { margin: 9px 0 0 23px; padding: 7px 11px; border: 0; border-radius: 10px; background: #202020; color: white; font-size: 11px; cursor: pointer; }
 :root[data-theme="dark"] .approve-image { background: #ececec; color: #202020; }
 .generated-image-wrap:hover .image-download,
 .image-download:focus-visible { opacity: 1; transform: translateY(0); }
