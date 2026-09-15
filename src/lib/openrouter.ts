@@ -83,12 +83,11 @@ function safeError(error: unknown) {
   return sanitize(error instanceof Error ? error.message : "Unknown provider error");
 }
 
-function requestBody(model: string, messages: ChatMessage[], stream: boolean, webSearch = false, responseFormat?: unknown) {
+function requestBody(model: string, messages: ChatMessage[], stream: boolean, responseFormat?: unknown) {
   const hasPdf = messages.some((message) => message.attachments?.some((attachment) => attachment.mediaType === "application/pdf"));
   const disableReasoning = model === "qwen/qwen3.7-flash" || model === "inclusionai/ling-3.0-flash-fin:free";
   const plugins = [
     ...(hasPdf ? [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] : []),
-    ...(webSearch ? [{ id: "web", max_results: 5 }] : []),
   ];
   return JSON.stringify({
     model,
@@ -106,48 +105,85 @@ export async function completeWithFallback(
   stage: ModelAttempt["stage"],
   models: readonly string[],
   messages: ChatMessage[],
-  options?: { responseFormat?: unknown; timeoutMs?: number; provider?: ProviderConnection },
+  options?: { responseFormat?: unknown; timeoutMs?: number; provider?: ProviderConnection; onDelta?: (chunk: string) => void },
 ) {
   const trace: ModelAttempt[] = [];
   for (const [index, model] of models.entries()) {
     const startedAt = performance.now();
     console.info("[model] attempt", { stage, model, fallback: index > 0 });
+    const controller = new AbortController();
+    const totalTimer = setTimeout(() => controller.abort(new Error(`timed out after ${options?.timeoutMs ?? 8_000}ms`)), options?.timeoutMs ?? 8_000);
+    let streamed = "";
+    let resolvedModel = model;
+    let result: CompletionResult | undefined;
     try {
-      const target = connection(options?.provider);
-      const response = await fetch(`${target.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: target.headers,
-        signal: AbortSignal.timeout(options?.timeoutMs ?? 8_000),
-        body: requestBody(model, messages, false, false, options?.responseFormat),
-      });
-      const result = (await response.json()) as CompletionResult;
-      const choice = result.choices?.[0];
-      const content = choice?.message?.content;
-      if (!response.ok) throw new Error(errorDetail(result.error, response.status));
-      if (!content) {
-        const detail = [
-          "Model returned no visible content",
-          `HTTP ${response.status}`,
-          result.model ? `resolved=${result.model}` : "",
-          result.provider ? `provider=${result.provider}` : "",
-          choice?.finish_reason ? `finish=${choice.finish_reason}` : "",
-          choice?.native_finish_reason ? `nativeFinish=${choice.native_finish_reason}` : "",
-          `reasoning=${Boolean(choice?.message?.reasoning)}`,
-          `choices=${result.choices?.length ?? 0}`,
-          result.id ? `generation=${result.id}` : "",
-        ].filter(Boolean).join(" | ");
-        console.error("[model] empty completion", { stage, requestedModel: model, detail });
-        throw new Error(detail);
+      let content: string;
+      if (options?.onDelta) {
+        const upstream = await streamCompletion(model, messages, controller.signal, index > 0, options.provider);
+        const reader = upstream.response.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+            const chunk = JSON.parse(line.slice(6)) as { choices?: Array<{ delta?: { content?: string } }>; error?: { code?: number; message?: string }; model?: string };
+            if (chunk.error) throw new Error([chunk.error.message ?? "Provider stream failed", chunk.error.code ? `code=${chunk.error.code}` : ""].filter(Boolean).join(" | "));
+            if (chunk.model) resolvedModel = chunk.model;
+            const delta = chunk.choices?.[0]?.delta?.content;
+            if (delta) {
+              streamed += delta;
+              options.onDelta(delta);
+            }
+          }
+        }
+        content = streamed;
+      } else {
+        const target = connection(options?.provider);
+        const response = await fetch(`${target.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: target.headers,
+          signal: AbortSignal.timeout(options?.timeoutMs ?? 8_000),
+          body: requestBody(model, messages, false, options?.responseFormat),
+        });
+        result = (await response.json()) as CompletionResult;
+        if (!response.ok) throw new Error(errorDetail(result.error, response.status));
+        content = result.choices?.[0]?.message?.content ?? "";
+        resolvedModel = result.model ?? model;
+        if (!content) {
+          const choice = result.choices?.[0];
+          const detail = [
+            "Model returned no visible content",
+            `HTTP ${response.status}`,
+            result.model ? `resolved=${result.model}` : "",
+            result.provider ? `provider=${result.provider}` : "",
+            choice?.finish_reason ? `finish=${choice.finish_reason}` : "",
+            choice?.native_finish_reason ? `nativeFinish=${choice.native_finish_reason}` : "",
+            `reasoning=${Boolean(choice?.message?.reasoning)}`,
+            `choices=${result.choices?.length ?? 0}`,
+            result.id ? `generation=${result.id}` : "",
+          ].filter(Boolean).join(" | ");
+          console.error("[model] empty completion", { stage, requestedModel: model, detail });
+          throw new Error(detail);
+        }
       }
       const durationMs = Math.round(performance.now() - startedAt);
       trace.push({ stage, model, status: "succeeded", durationMs, fallback: index > 0 });
-      console.info("[model] success", { stage, requestedModel: model, resolvedModel: result.model, provider: result.provider, durationMs, fallback: index > 0 });
-      return { content, model: result.model ?? model, trace };
+      console.info("[model] success", { stage, requestedModel: model, resolvedModel, provider: result?.provider, durationMs, fallback: index > 0 });
+      return { content, model: resolvedModel, trace };
     } catch (error) {
       const durationMs = Math.round(performance.now() - startedAt);
       const message = safeError(error);
       trace.push({ stage, model, status: "failed", durationMs, fallback: index > 0, error: message });
       console.error("[model] failure", { stage, model, durationMs, fallback: index > 0, error: message });
+      // Streaming already surfaced partial output; retrying another model would duplicate it.
+      if (streamed) return { content: streamed, model: resolvedModel, trace };
+    } finally {
+      clearTimeout(totalTimer);
     }
   }
   throw new ModelExecutionError(`All ${stage} models failed`, trace);
@@ -158,14 +194,14 @@ export type StreamingCompletion = {
   startedAt: number;
   generationId: string | null;
 };
-export async function streamCompletion(model: string, messages: ChatMessage[], signal: AbortSignal, fallback: boolean, webSearch: boolean, provider?: ProviderConnection): Promise<StreamingCompletion> {
+export async function streamCompletion(model: string, messages: ChatMessage[], signal: AbortSignal, fallback: boolean, provider?: ProviderConnection): Promise<StreamingCompletion> {
   const startedAt = performance.now();
   const target = connection(provider);
   const response = await fetch(`${target.baseUrl}/chat/completions`, {
     method: "POST",
     headers: target.headers,
     signal,
-    body: requestBody(model, messages, true, webSearch && !provider),
+    body: requestBody(model, messages, true),
   });
   if (!response.ok || !response.body) {
     const result = await response.json().catch(() => ({})) as CompletionResult;

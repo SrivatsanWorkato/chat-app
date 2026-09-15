@@ -93,12 +93,13 @@ export type ChatRequest = {
 };
 
 export type ModelAttempt = {
-  stage: "router" | "response" | "image";
+  stage: "router" | "response" | "image" | "web";
   model: string;
   status: "succeeded" | "failed";
   durationMs: number;
   fallback: boolean;
   webSearch?: boolean;
+  title?: string;
   error?: string;
 };
 

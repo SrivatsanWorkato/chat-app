@@ -10,6 +10,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -65,6 +66,57 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
+
+function MixWorkflow({ mix, approvalTaskId, onApprove, disabled }: { mix: NonNullable<StoredMessage["mix"]>; approvalTaskId?: string; onApprove: () => void; disabled: boolean }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const approvalPending = mix.tasks.some((task) => task.status === "approval_required");
+  const open = approvalPending || (userOpen ?? !mix.completed);
+  const done = mix.tasks.filter((task) => task.status === "completed" || task.status === "failed").length;
+  return (
+    <Collapsible open={open} onOpenChange={setUserOpen} className="mix-workflow">
+      <CollapsibleTrigger className="mix-plan-summary">
+        <Badge variant="secondary">Mix plan</Badge>
+        <span className="mix-plan-goal">{mix.plan.goal}</span>
+        <span className="mix-plan-state">{done}/{mix.tasks.length} · {mix.completed ? "Complete" : "In progress"}</span>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mix-plan-body">
+        <ol className="mix-plan">
+          {mix.tasks.map((task) => (
+            <li key={task.id} className={`mix-task ${task.status}`}>
+              <div className="mix-task-head">
+                <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : task.status === "approval_required" ? "$" : "○"}</span>
+                <strong>{task.title}</strong>
+                <Badge variant="outline">{task.capability}</Badge>
+              </div>
+              {task.model && <span className="mix-model">{task.model}</span>}
+              {task.status === "approval_required" && approvalTaskId === task.id && <Button className="approve-image" onClick={onApprove} disabled={disabled}>Generate image · ~$0.019</Button>}
+            </li>
+          ))}
+        </ol>
+      </CollapsibleContent>
+      {mix.tasks.some((task) => task.output || task.image || task.error) && (
+        <div className="mix-replies">
+          <div className="mix-replies-label">Results</div>
+          {mix.tasks.map((task) => task.output || task.image || task.error ? (
+            <div key={task.id} className={`mix-reply ${task.status}`}>
+              <div className="mix-reply-head">
+                <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : "○"}</span>
+                <strong>{task.title}</strong>
+                <Badge variant="outline">{task.capability}</Badge>
+              </div>
+              {task.capability === "image" && task.image ? (
+                <figure className="generated-image-wrap"><img className="generated-image" src={task.image.dataUrl} alt={task.title} /><a className="image-download" href={task.image.dataUrl} download={`${task.id}.png`}>Download</a></figure>
+              ) : task.output ? (
+                <div className="mix-output"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{task.output}</ReactMarkdown></div>
+              ) : null}
+              {task.error && <Alert variant="destructive" className="mix-error"><AlertDescription>{task.error}</AlertDescription></Alert>}
+            </div>
+          ) : null)}
+        </div>
+      )}
+    </Collapsible>
+  );
+}
 const markdownComponents = { pre: CodeBlock };
 
 export default function Home() {
@@ -693,7 +745,7 @@ export default function Home() {
                             <summary>{message.route.trace.length} model attempt{message.route.trace.length === 1 ? "" : "s"}</summary>
                             <div>{message.route.trace.map((attempt, index) => (
                               <p key={`${attempt.stage}-${attempt.model}-${index}`} className={attempt.status}>
-                                <span>{attempt.status === "succeeded" ? "✓" : "×"}</span><b>{attempt.stage}</b><code>{attempt.model}</code>{attempt.fallback && <em>fallback</em>}<small>{attempt.durationMs} ms</small>{attempt.error && <i>{attempt.error}</i>}
+                                <span>{attempt.status === "succeeded" ? "✓" : "×"}</span><b>{attempt.stage}</b><span className="trace-src">{attempt.title && <b className="trace-title">{attempt.title}</b>}<code>{attempt.model}</code></span>{attempt.fallback && <em>fallback</em>}<small>{attempt.durationMs} ms</small>{attempt.error && <i>{attempt.error}</i>}
                               </p>
                             ))}</div>
                           </details>
@@ -701,43 +753,12 @@ export default function Home() {
                       </div>
                     )}
                     {message.mix && (
-                      <div className="mix-workflow">
-                        <div className="mix-workflow-header"><Badge variant="secondary">Mix plan</Badge><span>{message.mix.completed ? "Complete" : "In progress"}</span></div>
-                        <h2>{message.mix.plan.goal}</h2>
-                        <ol className="mix-plan">
-                          {message.mix.tasks.map((task) => (
-                            <li key={task.id} className={`mix-task ${task.status}`}>
-                              <div className="mix-task-head">
-                                <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : task.status === "approval_required" ? "$" : "○"}</span>
-                                <strong>{task.title}</strong>
-                                <Badge variant="outline">{task.capability}</Badge>
-                              </div>
-                              {task.model && <span className="mix-model">{task.model}</span>}
-                              {task.status === "approval_required" && mixApproval?.taskId === task.id && <Button className="approve-image" onClick={() => { const approval = mixApproval; setMixApproval(null); runMix(approval.prompt, approval.plan, approval.taskId, approval.messageId, activeConversationId); }} disabled={isResponding}>Generate image · ~$0.019</Button>}
-                            </li>
-                          ))}
-                        </ol>
-                        {message.mix.tasks.some((task) => task.output || task.image || task.error) && (
-                          <div className="mix-replies">
-                            <div className="mix-replies-label">Results</div>
-                            {message.mix.tasks.map((task) => task.output || task.image || task.error ? (
-                              <div key={task.id} className={`mix-reply ${task.status}`}>
-                                <div className="mix-reply-head">
-                                  <span className="mix-status">{task.status === "completed" ? "✓" : task.status === "failed" ? "!" : task.status === "running" ? "●" : "○"}</span>
-                                  <strong>{task.title}</strong>
-                                  <Badge variant="outline">{task.capability}</Badge>
-                                </div>
-                                {task.capability === "image" && task.image ? (
-                                  <figure className="generated-image-wrap"><img className="generated-image" src={task.image.dataUrl} alt={task.title} /><a className="image-download" href={task.image.dataUrl} download={`${task.id}.png`}>Download</a></figure>
-                                ) : task.output ? (
-                                  <div className="mix-output"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{task.output}</ReactMarkdown></div>
-                                ) : null}
-                                {task.error && <Alert variant="destructive" className="mix-error"><AlertDescription>{task.error}</AlertDescription></Alert>}
-                              </div>
-                            ) : null)}
-                          </div>
-                        )}
-                      </div>
+                      <MixWorkflow
+                        mix={message.mix}
+                        approvalTaskId={mixApproval?.taskId}
+                        onApprove={() => { const approval = mixApproval; if (!approval) return; setMixApproval(null); runMix(approval.prompt, approval.plan, approval.taskId, approval.messageId, activeConversationId); }}
+                        disabled={isResponding}
+                      />
                     )}
                     {message.attachments?.length ? (
                       <div className="message-attachments">

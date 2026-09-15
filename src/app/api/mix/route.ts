@@ -121,9 +121,12 @@ export async function POST(request: Request) {
               continue;
             }
             const models = provider ? [model, fallback].filter((item): item is string => Boolean(item)) : [model, ...FALLBACK_MODELS[task.capability]];
-            const result = await completeWithFallback("response", models, [{ role: "user", content: `Complete this task only.\nTask: ${task.instruction}\nOriginal goal: ${body.prompt}\nDependency outputs:\n${dependencyContext || "None"}\nReturn concise Markdown.` }], { timeoutMs: 20_000, provider });
+            const result = await completeWithFallback("response", models, [{ role: "user", content: `Complete this task only.\nTask: ${task.instruction}\nOriginal goal: ${body.prompt}\nDependency outputs:\n${dependencyContext || "None"}\nReturn concise Markdown.` }], {
+              timeoutMs: 20_000,
+              provider,
+              onDelta: (chunk) => controller.enqueue(encoder.encode(event({ type: "mix_task_delta", taskId: task.id, content: chunk }))),
+            });
             outputs.set(task.id, result.content);
-            controller.enqueue(encoder.encode(event({ type: "mix_task_delta", taskId: task.id, content: result.content })));
             controller.enqueue(encoder.encode(event({ type: "mix_task_completed", taskId: task.id, output: result.content, model: result.model })));
           } catch (error) {
             controller.enqueue(encoder.encode(event({ type: "mix_task_failed", taskId: task.id, error: error instanceof Error ? error.message : "Task failed" })));

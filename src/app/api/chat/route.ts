@@ -1,5 +1,6 @@
 import { ChatMessage, ChatRequest, CHAT_MODES, CustomProviderConfig, FALLBACK_MODELS, MODELS, ModelAttempt, parseCustomProvider, RoutedMode } from "@/lib/chat";
 import { completeWithFallback, generateImage, logStreamResult, ModelExecutionError, streamCompletion, StreamingCompletion } from "@/lib/openrouter";
+import { formatWebContext, searchWeb } from "@/lib/websearch";
 
 const ROUTER_PROMPT = `Return exactly one JSON object: {"mode":"blitz|brain|image","rationale":"short reason"}. Use blitz for short answers and rewrites, brain for plans and complex work, and image only for explicit image generation.`;
 const SYSTEM_PROMPTS = {
@@ -55,8 +56,8 @@ export async function POST(request: Request) {
     const provider = parseCustomProvider(body.provider);
     const systemPrompt = typeof body.systemPrompt === "string" && body.systemPrompt.trim() ? body.systemPrompt.trim() : undefined;
     if (body.systemPrompt !== undefined && (systemPrompt === undefined || systemPrompt.length > 2000)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
+    const webSearch = body.webSearch;
     const messages = body.messages;
-    const webSearch = provider ? false : body.webSearch;
     const selected: { mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "manual" | "rule" | "model" } = body.mode === "auto" ? await decideRoute(messages, provider) : { mode: body.mode as RoutedMode, rationale: `You selected ${body.mode} mode.`, trace: [], routeSource: "manual" };
     trace.push(...selected.trace);
     const hasAttachments = messages.some((message) => message.attachments?.length);
@@ -79,13 +80,33 @@ export async function POST(request: Request) {
     const fallbacks = provider ? (configuredFallback ? [configuredFallback] : []) : hasAttachments ? FALLBACK_MODELS.vision : FALLBACK_MODELS[textMode];
     const models = [primary, ...fallbacks];
     const persona = systemPrompt ? `${systemPrompt}\n\n${SYSTEM_PROMPTS[textMode]}` : SYSTEM_PROMPTS[textMode];
-    const promptMessages = [{ role: "user" as const, content: persona }, ...messages];
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     const stream = new ReadableStream({
       async start(controller) {
         controller.enqueue(encoder.encode(ndjson({ type: "meta", mode: textMode, model: primary, fallbackModels: fallbacks, routeSource: selected.routeSource, rationale: selected.rationale, webSearch, trace })));
         let visibleContent = false;
+        let promptMessages = [{ role: "user" as const, content: persona }, ...messages];
+        if (webSearch) {
+          controller.enqueue(encoder.encode(ndjson({ type: "status", status: "Searching the web" })));
+          try {
+            const query = messages.at(-1)?.content ?? "";
+            const outcome = await searchWeb(query, { pages: 3, maxResults: 5 });
+            trace.push({ stage: "web", model: outcome.engine, status: outcome.results.length ? "succeeded" : "failed", durationMs: outcome.searchMs, fallback: false });
+            for (const result of outcome.results) {
+              trace.push({ stage: "web", model: result.url, title: result.title, status: result.error ? "failed" : "succeeded", durationMs: result.fetchMs ?? 0, fallback: false, ...(result.error ? { error: result.error } : {}) });
+            }
+            if (outcome.results.length) {
+              controller.enqueue(encoder.encode(ndjson({ type: "status", status: `Reading ${outcome.results.length} source${outcome.results.length === 1 ? "" : "s"}` })));
+              promptMessages = [{ role: "user" as const, content: `${persona}\n\n${formatWebContext(query, outcome.results)}` }, ...messages];
+            } else {
+              controller.enqueue(encoder.encode(ndjson({ type: "status", status: "No web results found; answering directly" })));
+            }
+          } catch (searchError) {
+            console.warn("[websearch] failed, answering directly", searchError instanceof Error ? searchError.message : searchError);
+            controller.enqueue(encoder.encode(ndjson({ type: "status", status: "Web search failed; answering directly" })));
+          }
+        }
         for (const [index, model] of models.entries()) {
           const attemptController = new AbortController();
           const totalTimer = setTimeout(() => attemptController.abort(new Error("20-second total timeout")), 20_000);
@@ -94,7 +115,7 @@ export async function POST(request: Request) {
           let reasoningSeen = false;
           let finishReason: string | undefined;
           try {
-            upstream = await streamCompletion(model, promptMessages, attemptController.signal, index > 0, webSearch, provider);
+            upstream = await streamCompletion(model, promptMessages, attemptController.signal, index > 0, provider);
             if (index > 0) controller.enqueue(encoder.encode(ndjson({ type: "fallback", model, routeSource: selected.routeSource, trace })));
             const reader = upstream.response.body!.getReader();
             let buffer = "";

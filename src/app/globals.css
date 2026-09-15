@@ -296,12 +296,11 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .mix-output :not(pre) > code { padding: .15em .38em; border-radius: 6px; background: color-mix(in srgb, var(--background) 90%, var(--foreground)); font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: .9em; overflow-wrap: anywhere; }
 .assistant .message-bubble a,
 .mix-output a { color: var(--accent); overflow-wrap: anywhere; }
-.mix-workflow-header { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
-.mix-workflow > h2 { margin: 9px 0 14px; font-size: 14px; line-height: 1.45; color: color-mix(in srgb, var(--foreground) 66%, var(--muted)); font-weight: 550; }
-.mix-plan { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.mix-plan { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; counter-reset: todo; }
 .mix-task { min-width: 0; padding: 5px 8px; border: 0; border-radius: 9px; background: transparent; }
 .mix-task.completed { background: transparent; }
-.mix-task-head { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.mix-task-head { display: flex; min-width: 0; align-items: center; gap: 9px; counter-increment: todo; }
+.mix-task-head::before { flex: 0 0 auto; color: var(--muted); content: counter(todo) "."; font-size: 11px; font-variant-numeric: tabular-nums; }
 .mix-task-head strong { min-width: 0; flex: 1; font-size: 12px; line-height: 1.35; color: color-mix(in srgb, var(--foreground) 78%, var(--muted)); font-weight: 550; }
 .mix-task.completed .mix-task-head strong { color: var(--muted); }
 .mix-task-head [data-slot="badge"] { flex: 0 0 auto; }
@@ -368,15 +367,22 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .execution-trace p.failed > span, .execution-trace p.failed i { color: #b42318; }
 .execution-trace code { overflow: hidden; color: var(--foreground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .execution-trace em { padding: 2px 5px; border-radius: 8px; background: #fff0c2; color: #785b00; font-size: 9px; font-style: normal; text-transform: uppercase; }
+.trace-src { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
+.trace-title { overflow: hidden; min-width: 0; flex: 1; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .execution-trace small { white-space: nowrap; }
 .execution-trace i { grid-column: 3 / -1; overflow-wrap: anywhere; font-style: normal; }
 .generated-image-wrap { position: relative; width: min(100%, 520px); margin: 12px 0 0; overflow: hidden; border: 1px solid #e2e2e2; border-radius: 15px; background: color-mix(in srgb, var(--background) 95%, var(--foreground)); }
 .generated-image { display: block; width: 100%; height: auto; border: 0; }
 .image-download { position: absolute; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 6px; padding: 8px 11px; border: 1px solid rgba(255,255,255,.28); border-radius: 20px; background: rgba(20,20,20,.78); color: white; backdrop-filter: blur(8px); font-size: 12px; font-weight: 600; text-decoration: none; opacity: 0; transform: translateY(4px); transition: opacity .15s ease, transform .15s ease, background .15s ease; }
-.mix-workflow { width: min(100%, 650px); margin: 4px 0 14px; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: color-mix(in srgb, var(--background) 97%, var(--foreground)); }
+.mix-workflow { min-width: 0; margin: 4px 0 14px; }
 .mix-output > :first-child { margin-top: 0; }
 .mix-output > :last-child { margin-bottom: 0; }
-.mix-replies { min-width: 0; display: grid; gap: 16px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.mix-replies { min-width: 0; display: grid; gap: 16px; margin-top: 14px; }
+.mix-plan-summary { display: flex; width: fit-content; max-width: 100%; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 10px; background: color-mix(in srgb, var(--background) 91%, var(--foreground)); cursor: pointer; list-style: none; user-select: none; }
+.mix-plan-summary::-webkit-details-marker { display: none; }
+.mix-plan-goal { overflow: hidden; min-width: 0; flex: 1; color: color-mix(in srgb, var(--foreground) 78%, var(--muted)); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.mix-plan-state { flex: 0 0 auto; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.mix-plan-body { margin: 8px 0 0; }
 .mix-replies-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
 .mix-reply { min-width: 0; }
 .mix-reply-head { display: flex; min-width: 0; align-items: center; gap: 9px; margin-bottom: 7px; }
@@ -419,6 +425,7 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-lineca
 .composer:focus-within { border-color: #c9c9c9; }
 .composer textarea { max-height: 160px; min-height: 24px; width: 100%; flex: none; resize: none; padding: 0 0 12px; border: 0; outline: 0; box-shadow: none; color: #262626; background: transparent; font-size: 15px; line-height: 1.35; }
 .composer textarea::placeholder { color: #8b8b8b; }
+.composer textarea:focus::placeholder { color: transparent; }
 .composer-actions { width: 100%; display: flex; align-items: center; gap: 3px; }
 .composer-icon, .send-button { width: 36px; height: 36px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 50%; cursor: pointer; }
 .composer-icon { background: transparent; }
