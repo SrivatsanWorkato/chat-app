@@ -263,6 +263,14 @@ export default function Home() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
+  const shouldAutoScroll = useRef(true);
+
+  function handleConversationScroll() {
+    const conversation = conversationRef.current;
+    if (!conversation) return;
+    shouldAutoScroll.current = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 48;
+  }
 
   useEffect(() => {
     const initialTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -330,7 +338,7 @@ export default function Home() {
     window.localStorage.setItem("chat-ui-preferences", JSON.stringify(nextPreferences));
   }
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (shouldAutoScroll.current) endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isResponding]);
   async function startNewChat() {
     try {
@@ -704,7 +712,7 @@ export default function Home() {
           </div>
         </header>
 
-        <section className={`conversation ${messages.length === 0 ? "conversation-empty" : ""}`}>
+        <section ref={conversationRef} onScroll={handleConversationScroll} className={`conversation ${messages.length === 0 ? "conversation-empty" : ""}`}>
           {messages.length === 0 ? (
             <div className="welcome">
               <div className="welcome-mark"><Sparkles /></div>
@@ -908,6 +916,7 @@ export default function Home() {
               <Button type="submit" size="icon" className="send-button" aria-label="Send message" disabled={(!input.trim() && attachments.length === 0) || isResponding}><ArrowUp /></Button>
             </div>
           </form>
+          <p className="disclaimer">AI can make mistakes. Please double-check responses.</p>
         </div>
       </main>
     </div>

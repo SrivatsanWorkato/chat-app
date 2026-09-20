@@ -7,7 +7,18 @@
       "args": [
         "shadcn@latest",
         "mcp"
-      ]
+      ],
+      "enabled": false
+    },
+    "Canva": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@latest",
+        "https://mcp.canva.com/mcp"
+      ],
+      "enabled": false
     }
   }
 }

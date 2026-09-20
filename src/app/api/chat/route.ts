@@ -28,6 +28,18 @@ function deterministicRoute(message: ChatMessage): { mode: RoutedMode; rationale
   if (/\b(rewrite|summari[sz]e|shorten|translate|headline|caption|hello|hi|hey)\b/.test(request) || request.length < 80) return { mode: "blitz", rationale: "This is a short or direct request." };
   return null;
 }
+function shouldSearchWeb(message: ChatMessage) {
+  if (message.attachments?.length) return false;
+  const request = message.content.trim().toLowerCase();
+  if (!request) return false;
+
+  const asksForCurrentInformation = /\b(latest|current|currently|today|tonight|tomorrow|yesterday|recent|recently|this (week|month|year)|now|right now|live|real[- ]?time|up[- ]?to[- ]?date|as of|weather|forecast|temperature|news|headline|score|standings|schedule|price|stock|market|exchange rate|traffic|status|release|version)\b/.test(request);
+  const asksToLookSomethingUp = /\b(search|browse|look up|find online|check online|on the web|on the internet|web sources?|online sources?|cite sources?|links? to|research)\b/.test(request);
+  const containsUrl = /https?:\/\/|www\./.test(request);
+
+  return asksForCurrentInformation || asksToLookSomethingUp || containsUrl;
+}
+
 
 async function decideRoute(messages: ChatMessage[], provider?: CustomProviderConfig): Promise<{ mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "rule" | "model" }> {
   const latest = messages.at(-1)!;
@@ -56,8 +68,8 @@ export async function POST(request: Request) {
     const provider = parseCustomProvider(body.provider);
     const systemPrompt = typeof body.systemPrompt === "string" && body.systemPrompt.trim() ? body.systemPrompt.trim() : undefined;
     if (body.systemPrompt !== undefined && (systemPrompt === undefined || systemPrompt.length > 2000)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
-    const webSearch = body.webSearch;
     const messages = body.messages;
+    const webSearch = body.webSearch && shouldSearchWeb(messages.at(-1)!);
     const selected: { mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "manual" | "rule" | "model" } = body.mode === "auto" ? await decideRoute(messages, provider) : { mode: body.mode as RoutedMode, rationale: `You selected ${body.mode} mode.`, trace: [], routeSource: "manual" };
     trace.push(...selected.trace);
     const hasAttachments = messages.some((message) => message.attachments?.length);
