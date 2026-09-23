@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { ChatMode } from "@/lib/chat";
-import { defaultPreferences, emptyProviderStore, loadActivePresetId, loadPreferences, loadPresets, loadProviderStore, saveActivePresetId, savePreferences, savePresets, saveProviderStore, type AppPreferences, type ModelPreset, type PresetMode, type ProviderProfile, type ProviderStore, type ThemePreference } from "@/lib/settings";
+import { defaultPreferences, emptyProviderStore, fetchProviderStore, loadActivePresetId, loadPreferences, loadPresets, saveActivePresetId, savePreferences, savePresets, type AppPreferences, type ModelPreset, type PresetMode, type ProviderProfile, type ProviderStore, type ThemePreference } from "@/lib/settings";
 
 const modeLabels: Record<ChatMode, string> = { auto: "Auto", brain: "Brain", blitz: "Blitz", mix: "Mix", image: "Image" };
 
@@ -23,9 +23,9 @@ export default function SettingsPage() {
   useEffect(() => {
     queueMicrotask(() => {
       setPreferences(loadPreferences());
-      setProviderStore(loadProviderStore());
       setPresets(loadPresets());
     });
+    void fetchProviderStore().then(setProviderStore);
     void fetch("/api/conversations").then(async (response) => {
       if (response.ok) setConversationCount((await response.json()).length);
     });
@@ -37,7 +37,7 @@ export default function SettingsPage() {
     window.setTimeout(() => setStatus(""), 1800);
   }
 
-  function saveProviderDraft() {
+  async function saveProviderDraft() {
     if (!providerDraft) return;
     const name = providerDraft.name.trim();
     const baseUrl = providerDraft.baseUrl.trim().replace(/\/+$/, "");
@@ -58,29 +58,38 @@ export default function SettingsPage() {
       setStatus("Brain, Blitz, and Image models are required.");
       return;
     }
-    const profile: ProviderProfile = { id: providerDraft.id ?? crypto.randomUUID(), name, baseUrl, apiKey: providerDraft.apiKey, models, fallbackEnabled: providerDraft.fallbackEnabled, fallbackModels: { brain: providerDraft.fallbackModels.brain.trim(), blitz: providerDraft.fallbackModels.blitz.trim(), image: providerDraft.fallbackModels.image.trim() } };
-    const providers = providerDraft.id ? providerStore.providers.map((existing) => existing.id === profile.id ? profile : existing) : [...providerStore.providers, profile];
-    const next = { ...providerStore, providers };
-    setProviderStore(next);
-    saveProviderStore(next);
+    const payload = { name, baseUrl, apiKey: providerDraft.apiKey, models, fallbackEnabled: providerDraft.fallbackEnabled, fallbackModels: { brain: providerDraft.fallbackModels.brain.trim(), blitz: providerDraft.fallbackModels.blitz.trim(), image: providerDraft.fallbackModels.image.trim() } };
+    const response = await fetch(providerDraft.id ? `/api/providers/${providerDraft.id}` : "/api/providers", { method: providerDraft.id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({})) as { error?: string };
+      setStatus(result.error ?? "Unable to save provider");
+      return;
+    }
+    setProviderStore(await fetchProviderStore());
     setProviderDraft(null);
     setStatus("Provider saved");
     window.setTimeout(() => setStatus(""), 1800);
   }
 
-  function deleteProvider(id: string) {
-    const providers = providerStore.providers.filter((provider) => provider.id !== id);
-    const next = { providers, activeId: providerStore.activeId === id ? null : providerStore.activeId };
-    setProviderStore(next);
-    saveProviderStore(next);
+  async function deleteProvider(id: string) {
+    const response = await fetch(`/api/providers/${id}`, { method: "DELETE" });
+    if (!response.ok && response.status !== 404) {
+      setStatus("Unable to delete provider");
+      return;
+    }
+    setProviderStore(await fetchProviderStore());
     setStatus("Provider deleted");
     window.setTimeout(() => setStatus(""), 1800);
   }
 
-  function selectActiveProvider(id: string) {
-    const next = { ...providerStore, activeId: id === "builtin" ? null : id };
-    setProviderStore(next);
-    saveProviderStore(next);
+  async function selectActiveProvider(id: string) {
+    const activeId = id === "builtin" ? null : id;
+    const response = await fetch("/api/providers", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ activeId }) });
+    if (!response.ok) {
+      setStatus("Unable to change active provider");
+      return;
+    }
+    setProviderStore((current) => ({ ...current, activeId }));
   }
 
   function savePreset() {
@@ -119,12 +128,13 @@ export default function SettingsPage() {
       setStatus("Base URL and a Blitz model are required to test the provider.");
       return;
     }
+    if (!providerDraft.id) {
+      setStatus("Save the provider first, then test the connection.");
+      return;
+    }
     setStatus("Testing connection…");
     try {
-      // The test streams from the Blitz model only. The server requires every model slot to be
-      // non-empty, so unfilled Brain/Image slots are filled with the Blitz model for this call.
-      const blitzModel = providerDraft.models.blitz.trim();
-      const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "blitz", messages: [{ role: "user", content: "Reply with OK." }], webSearch: false, provider: { baseUrl: providerDraft.baseUrl, apiKey: providerDraft.apiKey, models: { brain: providerDraft.models.brain.trim() || blitzModel, blitz: blitzModel, image: providerDraft.models.image.trim() || blitzModel } } }) });
+      const response = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "blitz", messages: [{ role: "user", content: "Reply with OK." }], webSearch: false, providerId: providerDraft.id }) });
       if (!response.ok || !response.body) {
         const result = await response.json().catch(() => ({})) as { error?: string };
         throw new Error(result.error ?? "Provider test failed");
@@ -188,22 +198,22 @@ export default function SettingsPage() {
             {providerStore.providers.map((provider) => (
               <div key={provider.id} className="provider-row">
                 <span><strong>{provider.name}</strong><small>{provider.baseUrl}</small></span>
-                <div className="settings-buttons"><Button variant="outline" size="sm" onClick={() => setProviderDraft({ id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiKey: provider.apiKey, models: { ...provider.models }, fallbackEnabled: provider.fallbackEnabled, fallbackModels: { ...provider.fallbackModels } })}>Edit</Button><Button variant="ghost" size="sm" onClick={() => deleteProvider(provider.id)}>Delete</Button></div>
+                <div className="settings-buttons"><Button variant="outline" size="sm" onClick={() => setProviderDraft({ id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiKey: "", hasApiKey: provider.hasApiKey, models: { ...provider.models }, fallbackEnabled: provider.fallbackEnabled, fallbackModels: { ...provider.fallbackModels } })}>Edit</Button><Button variant="ghost" size="sm" onClick={() => deleteProvider(provider.id)}>Delete</Button></div>
               </div>
             ))}
             {providerDraft ? (
               <div className="provider-form">
                 <label><span>Name</span><input type="text" placeholder="My OpenRouter key" autoComplete="off" value={providerDraft.name} onChange={(event) => setProviderDraft((current) => current && { ...current, name: event.target.value })} /></label>
                 <TextField label="Base URL" type="url" placeholder="https://api.example.com/v1" value={providerDraft.baseUrl} onChange={(baseUrl) => setProviderDraft((current) => current && { ...current, baseUrl })} />
-                <TextField label="API key" type="password" placeholder="Optional for local providers" value={providerDraft.apiKey} onChange={(apiKey) => setProviderDraft((current) => current && { ...current, apiKey })} />
+                <TextField label="API key" type="password" placeholder={providerDraft.hasApiKey ? "Leave blank to keep the saved key" : "Optional for local providers"} value={providerDraft.apiKey} onChange={(apiKey) => setProviderDraft((current) => current && { ...current, apiKey })} />
                 {(["brain", "blitz", "image"] as const).map((capability) => <TextField key={capability} label={`${modeLabels[capability]} model`} placeholder={`${capability}-model-id`} value={providerDraft.models[capability]} onChange={(value) => setProviderDraft((current) => current && { ...current, models: { ...current.models, [capability]: value } })} />)}
                 <ToggleRow title="Custom fallbacks" detail="One backup model per mode" checked={providerDraft.fallbackEnabled} onChange={(fallbackEnabled) => setProviderDraft((current) => current && { ...current, fallbackEnabled })} />
                 {providerDraft.fallbackEnabled && (["brain", "blitz", "image"] as const).map((capability) => <TextField key={`fallback-${capability}`} label={`${modeLabels[capability]} fallback`} placeholder="No fallback" value={providerDraft.fallbackModels[capability]} onChange={(value) => setProviderDraft((current) => current && { ...current, fallbackModels: { ...current.fallbackModels, [capability]: value } })} />)}
                 <div className="settings-buttons"><Button variant="outline" onClick={testConnection}>Test connection</Button><Button onClick={saveProviderDraft}>Save provider</Button><Button variant="ghost" onClick={() => setProviderDraft(null)}>Cancel</Button></div>
-                <p className="settings-note">The API key stays in this browser. Web search requires endpoint support.</p>
+                <p className="settings-note">API keys are encrypted and stored with your account; they are never sent back to the browser. Web search requires endpoint support.</p>
               </div>
             ) : (
-              <div className="settings-buttons"><Button onClick={() => setProviderDraft({ id: null, name: "", baseUrl: "", apiKey: "", models: { brain: "", blitz: "", image: "" }, fallbackEnabled: false, fallbackModels: { brain: "", blitz: "", image: "" } })}>New provider</Button></div>
+              <div className="settings-buttons"><Button onClick={() => setProviderDraft({ id: null, name: "", baseUrl: "", apiKey: "", hasApiKey: false, models: { brain: "", blitz: "", image: "" }, fallbackEnabled: false, fallbackModels: { brain: "", blitz: "", image: "" } })}>New provider</Button></div>
             )}
           </div></section>
           <section id="presets" className="settings-card"><header><h2>Model presets</h2><p>Reusable provider, mode, and personality combos for the composer.</p></header><div className="settings-grid">

@@ -1,5 +1,7 @@
-import { ChatMessage, ChatRequest, CHAT_MODES, CustomProviderConfig, FALLBACK_MODELS, MODELS, ModelAttempt, parseCustomProvider, RoutedMode } from "@/lib/chat";
+import { ChatMessage, ChatRequest, CHAT_MODES, CustomProviderConfig, FALLBACK_MODELS, MODELS, ModelAttempt, RoutedMode } from "@/lib/chat";
 import { completeWithFallback, generateImage, logStreamResult, ModelExecutionError, streamCompletion, StreamingCompletion } from "@/lib/openrouter";
+import { resolveProvider } from "@/lib/providers";
+import { getSession } from "@/lib/session";
 import { formatWebContext, searchWeb } from "@/lib/websearch";
 
 const ROUTER_PROMPT = `Return exactly one JSON object: {"mode":"blitz|brain|image","rationale":"short reason"}. Use blitz for short answers and rewrites, brain for plans and complex work, and image only for explicit image generation.`;
@@ -63,9 +65,13 @@ function ndjson(value: unknown) {
 export async function POST(request: Request) {
   const trace: ModelAttempt[] = [];
   try {
+    const session = await getSession();
+    if (!session) return Response.json({ error: "Unauthorized", trace }, { status: 401 });
     const body = (await request.json()) as Partial<ChatRequest>;
     if (!CHAT_MODES.includes(body.mode as ChatRequest["mode"]) || body.mode === "mix" || typeof body.webSearch !== "boolean" || !validMessages(body.messages)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
-    const provider = parseCustomProvider(body.provider);
+    if (body.providerId !== undefined && typeof body.providerId !== "string") return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
+    const provider = body.providerId ? await resolveProvider(session.user.id, body.providerId) : undefined;
+    if (body.providerId && !provider) return Response.json({ error: "Provider not found", trace }, { status: 404 });
     const systemPrompt = typeof body.systemPrompt === "string" && body.systemPrompt.trim() ? body.systemPrompt.trim() : undefined;
     if (body.systemPrompt !== undefined && (systemPrompt === undefined || systemPrompt.length > 2000)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
     const messages = body.messages;

@@ -8,6 +8,20 @@
       "when": 1789050875226,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789906653115,
+      "tag": "0001_clever_toad_men",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789998245518,
+      "tag": "0002_slimy_tiger_shark",
+      "breakpoints": true
     }
   ]
 }

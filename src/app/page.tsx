@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { ChangeEvent, FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from "react";
-import type { ChatAttachment, ChatMode, ChatResponse, CustomProviderConfig, MixPlan, StoredMessage } from "@/lib/chat";
+import type { ChatAttachment, ChatMode, ChatResponse, MixPlan, StoredMessage } from "@/lib/chat";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -14,8 +14,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ArrowUp, Check, Copy, Globe, Menu, Moon, MoreVertical, Paperclip, Pin, Plus, Settings2, Sparkles, Sun, Trash2, X } from "lucide-react";
-import { defaultPreferences, emptyProviderStore, loadActivePresetId, loadPreferences, loadPresets, loadProviderStore, saveActivePresetId, saveProviderStore, type AppPreferences, type ModelPreset, type ProviderStore } from "@/lib/settings";
+import { ArrowUp, Check, Copy, Globe, LogOut, Menu, Moon, MoreVertical, Paperclip, Pin, Plus, Settings2, Sparkles, Sun, Trash2, X } from "lucide-react";
+import { defaultPreferences, emptyProviderStore, fetchProviderStore, loadActivePresetId, loadPreferences, loadPresets, saveActivePresetId, type AppPreferences, type ModelPreset, type ProviderStore } from "@/lib/settings";
+import { authClient } from "@/lib/auth-client";
 
 type Message = StoredMessage;
 
@@ -143,6 +144,7 @@ export default function Home() {
   const [providerStore, setProviderStore] = useState<ProviderStore>(emptyProviderStore);
   const [presets, setPresets] = useState<ModelPreset[]>([]);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const { data: session } = authClient.useSession();
 
   const loadedConversations = useRef(new Set<string>());
   const messagesCache = useRef(new Map<string, Message[]>());
@@ -279,7 +281,6 @@ export default function Home() {
 
   useEffect(() => {
     const nextPreferences = loadPreferences();
-    const nextProviderStore = loadProviderStore();
     const nextPresets = loadPresets();
     const nextActivePresetId = loadActivePresetId();
     queueMicrotask(() => {
@@ -287,33 +288,17 @@ export default function Home() {
       setMode(nextPreferences.defaultMode);
       setWebSearch(nextPreferences.defaultWebSearch);
       setDeveloperMode(nextPreferences.diagnostics);
-      setProviderStore(nextProviderStore);
       setPresets(nextPresets);
       const activePreset = nextPresets.find((preset) => preset.id === nextActivePresetId);
       setActivePresetId(activePreset ? nextActivePresetId : null);
       if (activePreset) setMode(activePreset.mode);
     });
+    void fetchProviderStore().then(setProviderStore);
   }, []);
 
-  function customProvider(profileId?: string): CustomProviderConfig | undefined {
-    const profile = profileId
-      ? providerStore.providers.find((provider) => provider.id === profileId)
-      : providerStore.providers.find((provider) => provider.id === providerStore.activeId);
-    if (!profile) return undefined;
-    return {
-      baseUrl: profile.baseUrl.trim(),
-      apiKey: profile.apiKey,
-      models: {
-        brain: profile.models.brain.trim(),
-        blitz: profile.models.blitz.trim(),
-        image: profile.models.image.trim(),
-      },
-      ...(profile.fallbackEnabled ? { fallbackModels: {
-        brain: profile.fallbackModels.brain.trim(),
-        blitz: profile.fallbackModels.blitz.trim(),
-        image: profile.fallbackModels.image.trim(),
-      } } : {}),
-    };
+  function providerIdFor(profileId?: string): string | undefined {
+    const id = profileId ?? providerStore.activeId ?? undefined;
+    return id && providerStore.providers.some((provider) => provider.id === id) ? id : undefined;
   }
 
   function selectPreset(preset: ModelPreset) {
@@ -429,7 +414,7 @@ export default function Home() {
     setRequestStatus(plan ? "Generating approved image" : "Planning workflow");
     setIsResponding(true);
     try {
-      const response = await fetch("/api/mix", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, plan, approveImageTaskId, provider: customProvider() }) });
+      const response = await fetch("/api/mix", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt, plan, approveImageTaskId, providerId: providerIdFor() }) });
       if (!response.ok || !response.body) {
         const result = await response.json() as { error?: string };
         throw new Error(result.error ?? "Mix failed");
@@ -487,7 +472,7 @@ export default function Home() {
       setError("This preset's provider was deleted. Pick a different preset or active provider in Settings.");
       return;
     }
-    const requestProvider = activePreset ? (activePreset.provider === "builtin" ? undefined : customProvider(activePreset.provider)) : customProvider();
+    const requestProviderId = activePreset ? (activePreset.provider === "builtin" ? undefined : providerIdFor(activePreset.provider)) : providerIdFor();
     const presetName = activePreset?.name;
     let conversationId = activeConversationId;
     if (!conversationId) {
@@ -535,7 +520,7 @@ export default function Home() {
       const request = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: requestedMode, messages: requestMessages, webSearch, provider: requestProvider, ...(activePreset ? { systemPrompt: activePreset.systemPrompt } : {}) }),
+        body: JSON.stringify({ mode: requestedMode, messages: requestMessages, webSearch, providerId: requestProviderId, ...(activePreset ? { systemPrompt: activePreset.systemPrompt } : {}) }),
       });
       if (!request.ok || request.headers.get("content-type")?.includes("application/json")) {
         const result = (await request.json()) as Partial<ChatResponse> & { error?: string };
@@ -695,11 +680,11 @@ export default function Home() {
             </div>
           ))}
         </nav>
-        <Button variant="ghost" className="profile">
-          <Avatar size="sm"><AvatarFallback>S</AvatarFallback></Avatar>
-          <span className="profile-copy"><strong>Srivatsan</strong><small>Free plan</small></span>
-          <span className="profile-more">•••</span>
-        </Button>
+        <div className="profile account-profile">
+          <Avatar size="sm"><AvatarFallback>{session?.user.name.slice(0, 1).toUpperCase() ?? "U"}</AvatarFallback></Avatar>
+          <span className="profile-copy"><strong>{session?.user.name ?? "User"}</strong><small>{session?.user.email ?? ""}</small></span>
+          <Button variant="ghost" size="icon-sm" aria-label="Sign out" title="Sign out" onClick={async () => { await authClient.signOut(); window.location.href = "/login"; }}><LogOut /></Button>
+        </div>
       </aside>
 
       <main className="chat-main">
@@ -842,9 +827,11 @@ export default function Home() {
             value={providerChoice}
             onValueChange={(value) => {
               if (value === null || providerPinned) return;
-              const next = { ...providerStore, activeId: value === "builtin" ? null : value };
-              setProviderStore(next);
-              saveProviderStore(next);
+              const activeId = value === "builtin" ? null : value;
+              setProviderStore((current) => ({ ...current, activeId }));
+              void fetch("/api/providers", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ activeId }) }).then((res) => {
+                if (!res.ok) setError("Unable to change active provider");
+              }).catch(() => setError("Unable to change active provider"));
             }}
             disabled={isResponding || providerPinned}
           >

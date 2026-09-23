@@ -1,8 +1,9 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { conversations, messages } from "@/db/schema";
 import { serializeMessage } from "@/db/serialize";
 import type { StoredMessage } from "@/lib/chat";
+import { getSession } from "@/lib/session";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MEDIA_TYPES: Record<string, true> = { "application/pdf": true, "image/jpeg": true, "image/png": true, "image/webp": true };
@@ -75,6 +76,8 @@ function validIncoming(value: unknown): value is IncomingMessage {
 }
 
 export async function PUT(request: Request, context: Context) {
+  const session = await getSession();
+  if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await context.params;
   if (!UUID_PATTERN.test(id)) return Response.json({ error: "Invalid conversation id" }, { status: 400 });
   const body = await request.json().catch(() => null) as { messages?: unknown } | null;
@@ -85,7 +88,7 @@ export async function PUT(request: Request, context: Context) {
 
   try {
     const result = await db.transaction(async (tx) => {
-      const [conversation] = await tx.select().from(conversations).where(eq(conversations.id, id));
+      const [conversation] = await tx.select().from(conversations).where(and(eq(conversations.id, id), eq(conversations.userId, session.user.id)));
       if (!conversation) return null;
       await tx.delete(messages).where(eq(messages.conversationId, id));
       if (incoming.length > 0) {
@@ -102,7 +105,7 @@ export async function PUT(request: Request, context: Context) {
       }
       const firstUser = incoming.find((message) => message.role === "user");
       const title = conversation.title === "New chat" && firstUser ? firstUser.content.slice(0, 44) || conversation.title : conversation.title;
-      const [updated] = await tx.update(conversations).set({ title, updatedAt: new Date() }).where(eq(conversations.id, id)).returning();
+      const [updated] = await tx.update(conversations).set({ title, updatedAt: new Date() }).where(and(eq(conversations.id, id), eq(conversations.userId, session.user.id))).returning();
       const rows = await tx.select().from(messages).where(eq(messages.conversationId, id)).orderBy(asc(messages.position));
       return { conversation: updated, rows };
     });

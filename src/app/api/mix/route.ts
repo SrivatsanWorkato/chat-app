@@ -1,5 +1,7 @@
-import { CustomProviderConfig, FALLBACK_MODELS, MixPlan, MODELS, parseCustomProvider } from "@/lib/chat";
+import { CustomProviderConfig, FALLBACK_MODELS, MixPlan, MODELS } from "@/lib/chat";
 import { completeWithFallback, generateImage } from "@/lib/openrouter";
+import { resolveProvider } from "@/lib/providers";
+import { getSession } from "@/lib/session";
 
 const PLANNER_PROMPT = `You plan a creative workflow. Create 2-6 tasks. Use brain for strategy, naming, positioning, and briefs; blitz for short copy and slogans; image only for explicitly requested images. At most one image task. Dependencies must reference earlier tasks. Do not put model names, URLs, tools, or secrets in the plan.`;
 const PLAN_SCHEMA = {
@@ -80,9 +82,13 @@ async function createPlan(prompt: string, provider?: CustomProviderConfig) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { prompt?: unknown; plan?: unknown; approveImageTaskId?: unknown; provider?: unknown };
+    const session = await getSession();
+    if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
+    const body = await request.json() as { prompt?: unknown; plan?: unknown; approveImageTaskId?: unknown; providerId?: unknown };
     if (typeof body.prompt !== "string" || body.prompt.length < 1 || body.prompt.length > 20_000) return Response.json({ error: "Invalid Mix request" }, { status: 400 });
-    const provider = parseCustomProvider(body.provider);
+    if (body.providerId !== undefined && typeof body.providerId !== "string") return Response.json({ error: "Invalid Mix request" }, { status: 400 });
+    const provider = body.providerId ? await resolveProvider(session.user.id, body.providerId) : undefined;
+    if (body.providerId && !provider) return Response.json({ error: "Provider not found" }, { status: 404 });
     let plan: MixPlan;
     if (body.plan !== undefined) {
       const error = planError(body.plan);
