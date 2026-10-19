@@ -10,6 +10,14 @@ import type { ChatMode } from "@/lib/chat";
 import { defaultPreferences, emptyProviderStore, fetchProviderStore, loadActivePresetId, loadPreferences, loadPresets, saveActivePresetId, savePreferences, savePresets, type AppPreferences, type ModelPreset, type PresetMode, type ProviderProfile, type ProviderStore, type ThemePreference } from "@/lib/settings";
 
 const modeLabels: Record<ChatMode, string> = { auto: "Auto", brain: "Brain", blitz: "Blitz", mix: "Mix", image: "Image" };
+type UsageResource = "tokens" | "images" | "videos" | "webSearches";
+type UsageSnapshot = { plan: "free" | "pro" | "max"; grantedPlan: "free" | "pro" | "max"; planExpiresAt: string | null; limits: Record<UsageResource, number>; usage: Record<UsageResource, number>; remaining: Record<UsageResource, number>; resetAt: string };
+const usageLabels: Record<UsageResource, string> = { tokens: "Tokens", images: "Images", videos: "Videos", webSearches: "Web searches" };
+const planLimits = {
+  free: { tokens: 100_000, images: 5, videos: 0, webSearches: 50 },
+  pro: { tokens: 2_000_000, images: 100, videos: 10, webSearches: 1_000 },
+  max: { tokens: 10_000_000, images: 500, videos: 50, webSearches: 5_000 },
+} as const;
 
 export default function SettingsPage() {
   const [preferences, setPreferences] = useState<AppPreferences>(defaultPreferences);
@@ -19,6 +27,8 @@ export default function SettingsPage() {
   const [conversationCount, setConversationCount] = useState(0);
   const [presets, setPresets] = useState<ModelPreset[]>([]);
   const [presetDraft, setPresetDraft] = useState<{ id: string | null; name: string; provider: string; mode: PresetMode; systemPrompt: string } | null>(null);
+  const [usage, setUsage] = useState<UsageSnapshot | null>(null);
+  const [usageError, setUsageError] = useState("");
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -29,6 +39,10 @@ export default function SettingsPage() {
     void fetch("/api/conversations").then(async (response) => {
       if (response.ok) setConversationCount((await response.json()).length);
     });
+    void fetch("/api/usage").then(async (response) => {
+      if (!response.ok) throw new Error("Unable to load usage");
+      setUsage(await response.json());
+    }).catch(() => setUsageError("Unable to load plan usage."));
   }, []);
 
   function save() {
@@ -182,8 +196,12 @@ export default function SettingsPage() {
       </header>
       {status && <div className="settings-status" role="status"><CheckCircle2 />{status}</div>}
       <div className="settings-layout">
-        <nav aria-label="Settings sections"><a href="#general">General</a><a href="#chat">Chat defaults</a><a href="#provider">Provider & models</a><a href="#presets">Model presets</a><a href="#data">Data</a><a href="#advanced">Advanced</a></nav>
+        <nav aria-label="Settings sections"><a href="#plan">Plan & usage</a><a href="#general">General</a><a href="#chat">Chat defaults</a><a href="#provider">Provider & models</a><a href="#presets">Model presets</a><a href="#data">Data</a><a href="#advanced">Advanced</a></nav>
         <div className="settings-content">
+          <section id="plan" className="settings-card"><header><h2>Plan & usage</h2><p>Built-in model usage resets monthly. Custom-provider usage does not count.</p></header><div className="settings-grid">
+            {usage ? <><p className="settings-note"><strong>{usage.plan[0].toUpperCase() + usage.plan.slice(1)} plan</strong>{usage.plan !== usage.grantedPlan ? ` · ${usage.grantedPlan[0].toUpperCase() + usage.grantedPlan.slice(1)} expired ${new Date(usage.planExpiresAt!).toLocaleDateString()}` : usage.planExpiresAt ? ` · valid until ${new Date(usage.planExpiresAt).toLocaleDateString()}` : ""} · usage resets {new Date(usage.resetAt).toLocaleDateString()}</p>{(Object.keys(usageLabels) as UsageResource[]).map((resource) => <div className="provider-row" key={resource}><span><strong>{usageLabels[resource]}</strong><small>{resource === "videos" ? "Video generation is not available yet" : `${usage.remaining[resource].toLocaleString()} remaining`}</small></span><span>{usage.usage[resource].toLocaleString()} / {usage.limits[resource].toLocaleString()}</span></div>)}</> : <p className="settings-note">{usageError || "Loading usage…"}</p>}
+            <div className="provider-form"><strong>Included monthly limits</strong>{(Object.entries(planLimits) as [keyof typeof planLimits, typeof planLimits.free][]).map(([plan, limits]) => <p className="settings-note" key={plan}><strong>{plan[0].toUpperCase() + plan.slice(1)}</strong>: {limits.tokens.toLocaleString()} tokens · {limits.images} images · {limits.videos} videos · {plan === "free" ? "Mix unavailable" : "Unlimited Mix"} · {limits.webSearches.toLocaleString()} searches</p>)}</div>
+          </div></section>
           <section id="general" className="settings-card"><header><h2>General</h2><p>Appearance and message composition.</p></header><div className="settings-grid">
             <label><span>Theme</span><Select value={preferences.theme} onValueChange={(theme) => setPreferences((current) => ({ ...current, theme: theme as ThemePreference }))}><SelectTrigger aria-label="Theme preference"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="system">System</SelectItem><SelectItem value="light">Light</SelectItem><SelectItem value="dark">Dark</SelectItem></SelectContent></Select></label>
             <ToggleRow title="Enter to send" detail="Use Shift+Enter for a new line" checked={preferences.enterToSend} onChange={(enterToSend) => setPreferences((current) => ({ ...current, enterToSend }))} />

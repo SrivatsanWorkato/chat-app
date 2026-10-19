@@ -1,7 +1,10 @@
+export type WebSourceKind = "listing" | "search" | "article";
+
 export type WebResult = {
   title: string;
   url: string;
   snippet: string;
+  kind: WebSourceKind;
   content?: string;
   fetched?: boolean;
   fetchMs?: number;
@@ -65,6 +68,13 @@ function resolveUrl(href: string) {
     return null;
   }
 }
+function sourceKind(url: string): WebSourceKind {
+  const parsed = new URL(url);
+  if (/amazon\.[a-z.]+$/i.test(parsed.hostname) && /^\/[^/]+\/(dp|gp\/product)\//i.test(parsed.pathname)) return "listing";
+  if (/\/dp\/|\/product\/|\/products\/|\/item\/|\/p\//i.test(parsed.pathname)) return "listing";
+  if (/\/s(?:\/|$)|\/search(?:\/|$)|[?&](?:q|query|k|search)=/i.test(`${parsed.pathname}${parsed.search}`)) return "search";
+  return "article";
+}
 
 async function searchDuckDuckGo(query: string): Promise<WebResult[]> {
   const response = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
@@ -83,7 +93,7 @@ async function searchDuckDuckGo(query: string): Promise<WebResult[]> {
     const snippetHtml = /class=["']?result-snippet["']?[^>]*>([\s\S]*?)<\/td>/i.exec(block)?.[1] ?? "";
     const title = stripTags(anchor.inner);
     const snippet = stripTags(snippetHtml);
-    if (title && url) results.push({ title: title.slice(0, 160), url, snippet: snippet.slice(0, 400) });
+    if (title && url) results.push({ title: title.slice(0, 160), url, snippet: snippet.slice(0, 400), kind: sourceKind(url) });
     if (results.length >= MAX_RESULTS) break;
   }
   return results;
@@ -107,7 +117,7 @@ async function searchMojeek(query: string): Promise<WebResult[]> {
     const block = html.slice(anchor.index + anchor.attrs.length, anchors[index + 1]?.index ?? html.length);
     const snippet = stripTags(/<p[^>]*class=["'][^"']*\bs\b[^>]*>([\s\S]*?)<\/p>/i.exec(block)?.[1] ?? "");
     const title = stripTags(anchor.inner);
-    if (title && url) results.push({ title: title.slice(0, 160), url, snippet: snippet.slice(0, 400) });
+    if (title && url) results.push({ title: title.slice(0, 160), url, snippet: snippet.slice(0, 400), kind: sourceKind(url) });
     if (results.length >= MAX_RESULTS) break;
   }
   return results;
@@ -198,13 +208,13 @@ export async function searchWeb(query: string, { pages = 3, maxResults = MAX_RES
 export function formatWebContext(query: string, results: WebResult[]) {
   const sections = results.map((result, index) => {
     const body = result.content ?? result.snippet;
-    return `[${index + 1}] ${result.title}\n${result.url}\n${body}`;
+    return `[${index + 1}] ${result.kind.toUpperCase()} — ${result.title}\n${result.url}\n${body}`;
   });
   return [
     `Web search results for "${query.trim()}" (retrieved ${new Date().toISOString().slice(0, 10)}):`,
     "",
     ...sections,
     "",
-    "Use these results as up-to-date evidence. Cite them inline as [1], [2] where used. If the results do not cover the question, say so and answer from general knowledge.",
+    "Evidence rules: only sources marked LISTING are exact product pages. Never describe SEARCH or ARTICLE sources as product listings, and do not attach a price to a product unless its cited source is a LISTING. Clearly qualify search snippets and articles as references rather than direct retailer listings. Cite sources inline as Markdown links using the source number and URL, e.g. [1](https://example.com/page). If the results do not cover the question, say so and answer from general knowledge.",
   ].join("\n");
 }

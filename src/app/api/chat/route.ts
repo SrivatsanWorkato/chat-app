@@ -3,6 +3,7 @@ import { completeWithFallback, generateImage, logStreamResult, ModelExecutionErr
 import { resolveProvider } from "@/lib/providers";
 import { getSession } from "@/lib/session";
 import { formatWebContext, searchWeb } from "@/lib/websearch";
+import { consumeQuota, estimateTokens, QuotaExceededError, quotaErrorResponse, refundQuota } from "@/lib/quota";
 
 const ROUTER_PROMPT = `Return exactly one JSON object: {"mode":"blitz|brain|image","rationale":"short reason"}. Use blitz for short answers and rewrites, brain for plans and complex work, and image only for explicit image generation.`;
 const SYSTEM_PROMPTS = {
@@ -34,14 +35,11 @@ function shouldSearchWeb(message: ChatMessage) {
   if (message.attachments?.length) return false;
   const request = message.content.trim().toLowerCase();
   if (!request) return false;
-
-  const asksForCurrentInformation = /\b(latest|current|currently|today|tonight|tomorrow|yesterday|recent|recently|this (week|month|year)|now|right now|live|real[- ]?time|up[- ]?to[- ]?date|as of|weather|forecast|temperature|news|headline|score|standings|schedule|price|stock|market|exchange rate|traffic|status|release|version)\b/.test(request);
-  const asksToLookSomethingUp = /\b(search|browse|look up|find online|check online|on the web|on the internet|web sources?|online sources?|cite sources?|links? to|research)\b/.test(request);
+  const currentInformation = /\b(latest|current|currently|today|tonight|tomorrow|yesterday|recent|recently|this (week|month|year)|now|right now|live|real[- ]?time|up[- ]?to[- ]?date|as of|weather|forecast|temperature|news|headline|score|standings|schedule|price|prices|pricing|stock|market|exchange rate|traffic|status|release|version)\b/.test(request);
+  const lookupIntent = /\b(search|browse|look up|lookup|find online|check (the )?(web|internet|online)|check online|on the web|on the internet|web sources?|online sources?|cite sources?|links? to|research|verify online)\b/.test(request);
   const containsUrl = /https?:\/\/|www\./.test(request);
-
-  return asksForCurrentInformation || asksToLookSomethingUp || containsUrl;
+  return currentInformation || lookupIntent || containsUrl;
 }
-
 
 async function decideRoute(messages: ChatMessage[], provider?: CustomProviderConfig): Promise<{ mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "rule" | "model" }> {
   const latest = messages.at(-1)!;
@@ -75,21 +73,31 @@ export async function POST(request: Request) {
     const systemPrompt = typeof body.systemPrompt === "string" && body.systemPrompt.trim() ? body.systemPrompt.trim() : undefined;
     if (body.systemPrompt !== undefined && (systemPrompt === undefined || systemPrompt.length > 2000)) return Response.json({ error: "Invalid chat request", trace }, { status: 400 });
     const messages = body.messages;
-    const webSearch = body.webSearch && shouldSearchWeb(messages.at(-1)!);
+    // The toggle permits search; the latest message must still request current or online information.
+    const webSearch = Boolean(body.webSearch) && shouldSearchWeb(messages.at(-1)!);
     const selected: { mode: RoutedMode; rationale: string; trace: ModelAttempt[]; routeSource: "manual" | "rule" | "model" } = body.mode === "auto" ? await decideRoute(messages, provider) : { mode: body.mode as RoutedMode, rationale: `You selected ${body.mode} mode.`, trace: [], routeSource: "manual" };
     trace.push(...selected.trace);
     const hasAttachments = messages.some((message) => message.attachments?.length);
     if (hasAttachments && selected.mode === "image") selected.mode = "brain";
     if (selected.mode === "image") {
+      if (!provider) {
+        try { await consumeQuota(session.user.id, "images"); }
+        catch (error) { if (error instanceof QuotaExceededError) return quotaErrorResponse(error); throw error; }
+      }
       const imageModel = provider?.models.image ?? MODELS.image;
       const imageFallback = provider?.fallbackModels?.image;
-      let image;
-      try { image = await generateImage(imageModel, messages.at(-1)?.content ?? "", provider); }
-      catch (error) {
-        if (!provider || !imageFallback) throw error;
-        image = await generateImage(imageFallback, messages.at(-1)?.content ?? "", provider);
+      try {
+        let image;
+        try { image = await generateImage(imageModel, messages.at(-1)?.content ?? "", provider); }
+        catch (error) {
+          if (!provider || !imageFallback) throw error;
+          image = await generateImage(imageFallback, messages.at(-1)?.content ?? "", provider);
+        }
+        return Response.json({ mode: "image", model: imageModel, routeSource: selected.routeSource, rationale: selected.rationale, content: "I generated an image from your prompt.", image: { dataUrl: image.dataUrl, model: imageModel }, trace: [...trace, ...image.trace] });
+      } catch (error) {
+        if (!provider) await refundQuota(session.user.id, "images");
+        throw error;
       }
-      return Response.json({ mode: "image", model: imageModel, routeSource: selected.routeSource, rationale: selected.rationale, content: "I generated an image from your prompt.", image: { dataUrl: image.dataUrl, model: imageModel }, trace: [...trace, ...image.trace] });
     }
 
     const textMode: Exclude<RoutedMode, "image"> = selected.mode;
@@ -105,6 +113,20 @@ export async function POST(request: Request) {
         controller.enqueue(encoder.encode(ndjson({ type: "meta", mode: textMode, model: primary, fallbackModels: fallbacks, routeSource: selected.routeSource, rationale: selected.rationale, webSearch, trace })));
         let visibleContent = false;
         let promptMessages = [{ role: "user" as const, content: persona }, ...messages];
+        let searchReserved = false;
+        if (webSearch && !provider) {
+          try {
+            await consumeQuota(session.user.id, "webSearches");
+            searchReserved = true;
+          } catch (error) {
+            if (error instanceof QuotaExceededError) {
+              controller.enqueue(encoder.encode(ndjson({ type: "error", code: "quota_exceeded", resource: error.resource, usage: error.usage, limit: error.limit, resetAt: error.resetAt })));
+              controller.close();
+              return;
+            }
+            throw error;
+          }
+        }
         if (webSearch) {
           controller.enqueue(encoder.encode(ndjson({ type: "status", status: "Searching the web" })));
           try {
@@ -112,17 +134,31 @@ export async function POST(request: Request) {
             const outcome = await searchWeb(query, { pages: 3, maxResults: 5 });
             trace.push({ stage: "web", model: outcome.engine, status: outcome.results.length ? "succeeded" : "failed", durationMs: outcome.searchMs, fallback: false });
             for (const result of outcome.results) {
-              trace.push({ stage: "web", model: result.url, title: result.title, status: result.error ? "failed" : "succeeded", durationMs: result.fetchMs ?? 0, fallback: false, ...(result.error ? { error: result.error } : {}) });
+              trace.push({ stage: "web", model: result.url, title: result.title, sourceKind: result.kind, status: result.error ? "failed" : "succeeded", durationMs: result.fetchMs ?? 0, fallback: false, ...(result.error ? { error: result.error } : {}) });
             }
             if (outcome.results.length) {
               controller.enqueue(encoder.encode(ndjson({ type: "status", status: `Reading ${outcome.results.length} source${outcome.results.length === 1 ? "" : "s"}` })));
               promptMessages = [{ role: "user" as const, content: `${persona}\n\n${formatWebContext(query, outcome.results)}` }, ...messages];
             } else {
+              if (searchReserved) { await refundQuota(session.user.id, "webSearches"); searchReserved = false; }
               controller.enqueue(encoder.encode(ndjson({ type: "status", status: "No web results found; answering directly" })));
             }
           } catch (searchError) {
+            if (searchReserved) { await refundQuota(session.user.id, "webSearches"); searchReserved = false; }
             console.warn("[websearch] failed, answering directly", searchError instanceof Error ? searchError.message : searchError);
             controller.enqueue(encoder.encode(ndjson({ type: "status", status: "Web search failed; answering directly" })));
+          }
+        }
+        if (!provider) {
+          const tokenEstimate = promptMessages.reduce((total, message) => total + estimateTokens(message.content), 0) + 4_096;
+          try { await consumeQuota(session.user.id, "tokens", tokenEstimate); }
+          catch (error) {
+            if (error instanceof QuotaExceededError) {
+              controller.enqueue(encoder.encode(ndjson({ type: "error", code: "quota_exceeded", resource: error.resource, usage: error.usage, limit: error.limit, resetAt: error.resetAt })));
+              controller.close();
+              return;
+            }
+            throw error;
           }
         }
         for (const [index, model] of models.entries()) {

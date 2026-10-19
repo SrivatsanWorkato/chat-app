@@ -1,4 +1,5 @@
-import { boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
+import { boolean, check, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type { ChatAttachment, MessageRoute, MixPlan, MixTaskState } from "@/lib/chat";
 
 export const user = pgTable("user", {
@@ -10,6 +11,35 @@ export const user = pgTable("user", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 });
+export const subscriptionPlan = pgEnum("subscription_plan", ["free", "pro", "max"]);
+export const planSource = pgEnum("plan_source", ["manual", "stripe"]);
+
+export const userPlans = pgTable("user_plans", {
+  userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
+  plan: subscriptionPlan("plan").notNull().default("free"),
+  /** null = never expires (manual/comped grants). Past expiry falls back to free. */
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  source: planSource("source").notNull().default("manual"),
+  externalSubscriptionId: text("external_subscription_id"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const monthlyUsage = pgTable(
+  "monthly_usage",
+  {
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    tokens: integer("tokens").notNull().default(0),
+    images: integer("images").notNull().default(0),
+    videos: integer("videos").notNull().default(0),
+    webSearches: integer("web_searches").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.periodStart] }),
+    check("monthly_usage_nonnegative", sql`${table.tokens} >= 0 AND ${table.images} >= 0 AND ${table.videos} >= 0 AND ${table.webSearches} >= 0`),
+  ],
+);
 
 export const session = pgTable(
   "session",

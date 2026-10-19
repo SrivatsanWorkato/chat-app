@@ -54,6 +54,40 @@ function connection(provider?: ProviderConnection) {
   };
 }
 
+export const VOICE_MODELS = {
+  transcription: "assemblyai/universal-3-5-pro",
+  speech: "deepgram/flux-tts:free",
+  voice: "flux-haley-en",
+} as const;
+
+export async function transcribeAudio(audio: ArrayBuffer, format: string) {
+  const target = connection();
+  const response = await fetch(`${target.baseUrl}/audio/transcriptions`, {
+    method: "POST",
+    headers: target.headers,
+    signal: AbortSignal.timeout(60_000),
+    body: JSON.stringify({ model: VOICE_MODELS.transcription, input_audio: { data: Buffer.from(audio).toString("base64"), format } }),
+  });
+  const result = await response.json() as { text?: string; error?: OpenRouterError };
+  if (!response.ok || result.error || typeof result.text !== "string") throw new Error(errorDetail(result.error, response.status));
+  return result.text;
+}
+
+export async function synthesizeSpeech(text: string, signal: AbortSignal) {
+  const target = connection();
+  const response = await fetch(`${target.baseUrl}/audio/speech`, {
+    method: "POST",
+    headers: target.headers,
+    signal,
+    body: JSON.stringify({ model: VOICE_MODELS.speech, voice: VOICE_MODELS.voice, input: text, response_format: "mp3" }),
+  });
+  if (!response.ok || !response.body) {
+    const result = await response.json().catch(() => ({})) as { error?: OpenRouterError };
+    throw new Error(errorDetail(result.error, response.status));
+  }
+  return response;
+}
+
 function openRouterMessages(messages: ChatMessage[]): OpenRouterMessage[] {
   return messages.map((message) => {
     if (!message.attachments?.length) return { role: message.role, content: message.content };
@@ -83,20 +117,25 @@ function safeError(error: unknown) {
   return sanitize(error instanceof Error ? error.message : "Unknown provider error");
 }
 
-function requestBody(model: string, messages: ChatMessage[], stream: boolean, responseFormat?: unknown) {
+function requestBody(model: string, messages: ChatMessage[], stream: boolean, responseFormat?: unknown, provider?: ProviderConnection) {
   const hasPdf = messages.some((message) => message.attachments?.some((attachment) => attachment.mediaType === "application/pdf"));
   const disableReasoning = model === "qwen/qwen3.7-flash" || model === "inclusionai/ling-3.0-flash-fin:free";
   const plugins = [
     ...(hasPdf ? [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] : []),
   ];
-  return JSON.stringify({
-    model,
-    messages: openRouterMessages(messages),
+  // Custom OpenAI-compatible endpoints reject OpenRouter-only parameters, and
+  // many models accept only their default temperature.
+  const openRouterOnly = provider ? {} : {
     temperature: 0.4,
-    stream,
     provider: { allow_fallbacks: true, sort: "latency", require_parameters: true },
     ...(disableReasoning ? { reasoning: { enabled: false, exclude: true } } : {}),
     ...(plugins.length ? { plugins } : {}),
+  };
+  return JSON.stringify({
+    model,
+    messages: openRouterMessages(messages),
+    stream,
+    ...openRouterOnly,
     ...(responseFormat ? { response_format: responseFormat } : {}),
   });
 }
@@ -148,7 +187,7 @@ export async function completeWithFallback(
           method: "POST",
           headers: target.headers,
           signal: AbortSignal.timeout(options?.timeoutMs ?? 8_000),
-          body: requestBody(model, messages, false, options?.responseFormat),
+          body: requestBody(model, messages, false, options?.responseFormat, options?.provider),
         });
         result = (await response.json()) as CompletionResult;
         if (!response.ok) throw new Error(errorDetail(result.error, response.status));
@@ -201,7 +240,7 @@ export async function streamCompletion(model: string, messages: ChatMessage[], s
     method: "POST",
     headers: target.headers,
     signal,
-    body: requestBody(model, messages, true),
+    body: requestBody(model, messages, true, undefined, provider),
   });
   if (!response.ok || !response.body) {
     const result = await response.json().catch(() => ({})) as CompletionResult;

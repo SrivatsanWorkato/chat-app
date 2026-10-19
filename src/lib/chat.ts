@@ -69,6 +69,7 @@ export type ModelAttempt = {
   fallback: boolean;
   webSearch?: boolean;
   title?: string;
+  sourceKind?: "listing" | "search" | "article";
   error?: string;
 };
 

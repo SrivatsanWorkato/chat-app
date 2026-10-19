@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChangeEvent, FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent, FormEvent, KeyboardEvent, ReactNode, useEffect, useRef, useState } from "react";
 import type { ChatAttachment, ChatMode, ChatResponse, MixPlan, StoredMessage } from "@/lib/chat";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -14,9 +14,10 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ArrowUp, Check, Copy, Globe, LogOut, Menu, Moon, MoreVertical, Paperclip, Pin, Plus, Settings2, Sparkles, Sun, Trash2, X } from "lucide-react";
+import { ArrowUp, Check, Copy, Globe, LogOut, Menu, Mic, Moon, MoreVertical, Paperclip, Pin, Plus, Settings2, Sparkles, Square, Sun, Trash2, Volume2, X } from "lucide-react";
 import { defaultPreferences, emptyProviderStore, fetchProviderStore, loadActivePresetId, loadPreferences, loadPresets, saveActivePresetId, type AppPreferences, type ModelPreset, type ProviderStore } from "@/lib/settings";
 import { authClient } from "@/lib/auth-client";
+import { SpeechQueue, startRecording, type RecordingSession } from "@/lib/voice";
 
 type Message = StoredMessage;
 
@@ -118,7 +119,26 @@ function MixWorkflow({ mix, approvalTaskId, onApprove, disabled }: { mix: NonNul
     </Collapsible>
   );
 }
-const markdownComponents = { pre: CodeBlock };
+const markdownComponents = {
+  pre: CodeBlock,
+  a: ({ href, children }: { href?: string; children?: ReactNode }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+};
+
+type WebSource = { title: string; url: string; kind: "listing" | "search" | "article" };
+
+/** Every search hit in prompt order, fetched or not; index+1 matches the [N] labels formatWebContext gave the model. */
+function webSources(route: StoredMessage["route"]): WebSource[] {
+  return route?.trace.flatMap((attempt) => attempt.stage === "web" && attempt.title ? [{ title: attempt.title, url: attempt.model, kind: attempt.sourceKind ?? "article" }] : []) ?? [];
+}
+
+/** Turns bare [N] citations into links against the injected source list; already-linked [N](url) are left alone. */
+function linkCitations(content: string, sources: WebSource[]) {
+  if (!sources.length) return content;
+  return content.replace(/\[(\d+)\](?!\()/g, (match, index: string) => {
+    const source = sources[Number(index) - 1];
+    return source ? `[${index}](${source.url})` : match;
+  });
+}
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
@@ -144,6 +164,10 @@ export default function Home() {
   const [providerStore, setProviderStore] = useState<ProviderStore>(emptyProviderStore);
   const [presets, setPresets] = useState<ModelPreset[]>([]);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [listening, setListening] = useState(false);
+  const [speakReplies, setSpeakReplies] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const { data: session } = authClient.useSession();
 
   const loadedConversations = useRef(new Set<string>());
@@ -267,6 +291,43 @@ export default function Home() {
   const endRef = useRef<HTMLDivElement>(null);
   const conversationRef = useRef<HTMLElement>(null);
   const shouldAutoScroll = useRef(true);
+  const recording = useRef<RecordingSession | null>(null);
+  const speech = useRef<SpeechQueue | null>(null);
+
+  function stopSpeaking() {
+    speech.current?.stop();
+    speech.current = null;
+  }
+
+  async function toggleListening() {
+    if (recording.current) {
+      const session = recording.current;
+      recording.current = null;
+      setListening(false);
+      setTranscribing(true);
+      try {
+        const transcript = await session.stop();
+        if (transcript) setInput((current) => current.trim() ? `${current.trimEnd()} ${transcript}` : transcript);
+      } catch (voiceError) {
+        setError(voiceError instanceof Error ? voiceError.message : "Unable to transcribe audio");
+      } finally {
+        setTranscribing(false);
+      }
+      return;
+    }
+    stopSpeaking();
+    try {
+      recording.current = await startRecording();
+      setListening(true);
+    } catch (voiceError) {
+      setError(voiceError instanceof Error ? voiceError.message : "Unable to access the microphone");
+    }
+  }
+
+  useEffect(() => () => {
+    void recording.current?.stop().catch(() => {});
+    speech.current?.stop();
+  }, []);
 
   function handleConversationScroll() {
     const conversation = conversationRef.current;
@@ -515,6 +576,10 @@ export default function Home() {
     setError("");
     setRequestStatus(requestedMode === "auto" ? "Choosing the best model" : webSearch ? "Searching the web" : `${presetName ?? modeLabels[requestedMode]} is thinking`);
     setIsResponding(true);
+    stopSpeaking();
+    if (recording.current) void toggleListening();
+    const queue = speakReplies ? new SpeechQueue(setSpeaking) : null;
+    speech.current = queue;
 
     try {
       const request = await fetch("/api/chat", {
@@ -554,9 +619,11 @@ export default function Home() {
             updateMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, route: { ...message.route, model: event.model ?? message.route.model, rationale: `Primary model failed; continuing with ${event.model}.`, trace: event.trace ?? message.route.trace } } : message));
           } else if (event.type === "delta" && event.content) {
             setRequestStatus("Generating response");
+            queue?.push(event.content);
             updateMessages((current) => current.map((message) => message.id === assistantId ? { ...message, content: message.content + event.content } : message));
           } else if (event.type === "done") {
             setRequestStatus("");
+            queue?.finish();
             updateMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, route: { ...message.route, trace: event.trace ?? [] } } : message));
           } else if (event.type === "error") {
             if (assistantAdded) updateMessages((current) => current.map((message) => message.id === assistantId && message.route ? { ...message, content: message.content || event.error || "The provider stream failed", route: { ...message.route, trace: event.trace ?? [] } } : message));
@@ -567,17 +634,15 @@ export default function Home() {
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Unable to reach the assistant");
     } finally {
+      queue?.finish();
       setIsResponding(false);
       setRequestStatus("");
       void syncNow({ conversationId, snapshot: messagesRef.current });
     }
   }
 
-  async function onFilesSelected(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = "";
+  async function addAttachments(files: File[]) {
     if (!files.length) return;
-
     const remaining = 4 - attachments.length;
     const accepted = files.slice(0, remaining);
     if (files.length > remaining) setError("You can attach up to 4 files per message.");
@@ -598,8 +663,24 @@ export default function Home() {
         reader.onerror = () => reject(new Error(`Unable to read ${file.name}`));
         reader.readAsDataURL(file);
       });
-      setAttachments((current) => [...current, { name: file.name, mediaType: file.type as ChatAttachment["mediaType"], dataUrl }]);
+      setAttachments((current) => [...current, { name: file.name || `pasted-image-${Date.now()}.png`, mediaType: file.type as ChatAttachment["mediaType"], dataUrl }]);
     }
+  }
+
+  async function onFilesSelected(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    await addAttachments(files);
+  }
+
+  function onComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const images = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (!images.length) return;
+    event.preventDefault();
+    void addAttachments(images);
   }
 
   function onSubmit(event: FormEvent) {
@@ -772,7 +853,12 @@ export default function Home() {
                       </div>
                     ) : (
                       <div className="message-bubble">
-                        {message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.content}</ReactMarkdown> : message.content}
+                        {message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{linkCitations(message.content, webSources(message.route))}</ReactMarkdown> : message.content}
+                        {message.role === "assistant" && webSources(message.route).length > 0 && (
+                          <ol className="web-sources" aria-label="Sources">
+                            {webSources(message.route).map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer" title={source.url}>{source.title}</a><small>{source.kind === "listing" ? "Exact product listing" : source.kind === "search" ? "Search results page — not an exact listing" : "Article or reference — not an exact listing"} · {new URL(source.url).hostname.replace(/^www\./, "")}</small></li>)}
+                          </ol>
+                        )}
                       </div>
                     )}
                     {message.role === "user" && editingMessageId !== message.id && (
@@ -860,11 +946,12 @@ export default function Home() {
           <form className="composer" onSubmit={onSubmit}>
             <Textarea
               aria-label="Message"
-              placeholder="Message AI Models..."
+              placeholder={listening ? "Recording... click the mic again to transcribe" : transcribing ? "Transcribing..." : "Message AI Models..."}
               rows={1}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={onKeyDown}
+              onPaste={onComposerPaste}
             />
             <div className="composer-actions">
               <input ref={fileInputRef} className="file-input" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" multiple onChange={onFilesSelected} />
@@ -880,6 +967,21 @@ export default function Home() {
                 </TooltipTrigger>
                 <TooltipContent>Search web</TooltipContent>
               </Tooltip>
+              <Tooltip>
+                <TooltipTrigger render={<Button type="button" variant="ghost" size="icon" className={`web-toggle ${listening ? "listening" : ""}`} aria-label={listening ? "Stop recording and transcribe" : "Record voice message"} aria-pressed={listening} onClick={() => void toggleListening()} disabled={isResponding || transcribing} />}>
+                  <Mic />
+                </TooltipTrigger>
+                <TooltipContent>{listening ? "Stop and transcribe" : transcribing ? "Transcribing" : "Record voice"}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger render={<Button type="button" variant="ghost" size="icon" className={`web-toggle ${speakReplies ? "active" : ""}`} aria-label="Read replies aloud" aria-pressed={speakReplies} onClick={() => { if (speakReplies) stopSpeaking(); setSpeakReplies((enabled) => !enabled); }} />}>
+                  <Volume2 />
+                </TooltipTrigger>
+                <TooltipContent>Read replies aloud</TooltipContent>
+              </Tooltip>
+              {speaking && (
+                <Button type="button" variant="ghost" size="icon" className="web-toggle speaking" aria-label="Stop speaking" onClick={stopSpeaking}><Square /></Button>
+              )}
               {presets.length > 0 && (
                 <Select
                   value={activePresetId ?? "none"}

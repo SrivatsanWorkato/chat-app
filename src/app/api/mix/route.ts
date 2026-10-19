@@ -2,6 +2,7 @@ import { CustomProviderConfig, FALLBACK_MODELS, MixPlan, MODELS } from "@/lib/ch
 import { completeWithFallback, generateImage } from "@/lib/openrouter";
 import { resolveProvider } from "@/lib/providers";
 import { getSession } from "@/lib/session";
+import { consumeQuota, getUserPlan, QuotaExceededError, quotaErrorResponse, refundQuota } from "@/lib/quota";
 
 const PLANNER_PROMPT = `You plan a creative workflow. Create 2-6 tasks. Use brain for strategy, naming, positioning, and briefs; blitz for short copy and slogans; image only for explicitly requested images. At most one image task. Dependencies must reference earlier tasks. Do not put model names, URLs, tools, or secrets in the plan.`;
 const PLAN_SCHEMA = {
@@ -86,17 +87,22 @@ export async function POST(request: Request) {
     if (!session) return Response.json({ error: "Unauthorized" }, { status: 401 });
     const body = await request.json() as { prompt?: unknown; plan?: unknown; approveImageTaskId?: unknown; providerId?: unknown };
     if (typeof body.prompt !== "string" || body.prompt.length < 1 || body.prompt.length > 20_000) return Response.json({ error: "Invalid Mix request" }, { status: 400 });
+    const prompt = body.prompt;
     if (body.providerId !== undefined && typeof body.providerId !== "string") return Response.json({ error: "Invalid Mix request" }, { status: 400 });
     const provider = body.providerId ? await resolveProvider(session.user.id, body.providerId) : undefined;
     if (body.providerId && !provider) return Response.json({ error: "Provider not found" }, { status: 404 });
+    if (!provider && (await getUserPlan(session.user.id)).plan === "free") return Response.json({ error: "Mix is available on Pro and Max plans", code: "plan_required", requiredPlan: "pro" }, { status: 403 });
     let plan: MixPlan;
     if (body.plan !== undefined) {
       const error = planError(body.plan);
       if (error) return Response.json({ error: `Invalid Mix plan: ${error}` }, { status: 400 });
       plan = body.plan as MixPlan;
     } else {
-      try { plan = await createPlan(body.prompt, provider); }
-      catch (error) { return Response.json({ error: error instanceof Error ? error.message : "Mix could not create a safe execution plan" }, { status: 502 }); }
+      try {
+        plan = await createPlan(prompt, provider);
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : "Mix could not create a safe execution plan" }, { status: 502 });
+      }
     }
 
     const approvedTask = typeof body.approveImageTaskId === "string" ? body.approveImageTaskId : undefined;
@@ -116,18 +122,33 @@ export async function POST(request: Request) {
           controller.enqueue(encoder.encode(event({ type: "mix_task_started", taskId: task.id, model })));
           try {
             if (task.capability === "image") {
-              let image;
-              try { image = await generateImage(model, `${task.instruction}\n\nContext:\n${dependencyContext}`, provider); }
-              catch (error) {
-                if (!provider || !fallback) throw error;
-                image = await generateImage(fallback, `${task.instruction}\n\nContext:\n${dependencyContext}`, provider);
+              if (!provider) {
+                try { await consumeQuota(session.user.id, "images"); }
+                catch (error) {
+                  if (error instanceof QuotaExceededError) {
+                    controller.enqueue(encoder.encode(event({ type: "mix_task_failed", taskId: task.id, code: "quota_exceeded", resource: error.resource, usage: error.usage, limit: error.limit, resetAt: error.resetAt })));
+                    continue;
+                  }
+                  throw error;
+                }
               }
-              outputs.set(task.id, "Image generated");
-              controller.enqueue(encoder.encode(event({ type: "mix_task_completed", taskId: task.id, output: "Image generated", image: { dataUrl: image.dataUrl, model: fallback && image.trace.some((attempt) => attempt.model === fallback && attempt.status === "succeeded") ? fallback : model } })));
+              try {
+                let image;
+                try { image = await generateImage(model, `${task.instruction}\n\nContext:\n${dependencyContext}`, provider); }
+                catch (error) {
+                  if (!provider || !fallback) throw error;
+                  image = await generateImage(fallback, `${task.instruction}\n\nContext:\n${dependencyContext}`, provider);
+                }
+                outputs.set(task.id, "Image generated");
+                controller.enqueue(encoder.encode(event({ type: "mix_task_completed", taskId: task.id, output: "Image generated", image: { dataUrl: image.dataUrl, model: fallback && image.trace.some((attempt) => attempt.model === fallback && attempt.status === "succeeded") ? fallback : model } })));
+              } catch (error) {
+                if (!provider) await refundQuota(session.user.id, "images");
+                throw error;
+              }
               continue;
             }
             const models = provider ? [model, fallback].filter((item): item is string => Boolean(item)) : [model, ...FALLBACK_MODELS[task.capability]];
-            const result = await completeWithFallback("response", models, [{ role: "user", content: `Complete this task only.\nTask: ${task.instruction}\nOriginal goal: ${body.prompt}\nDependency outputs:\n${dependencyContext || "None"}\nReturn concise Markdown.` }], {
+            const result = await completeWithFallback("response", models, [{ role: "user", content: `Complete this task only.\nTask: ${task.instruction}\nOriginal goal: ${prompt}\nDependency outputs:\n${dependencyContext || "None"}\nReturn concise Markdown.` }], {
               timeoutMs: 20_000,
               provider,
               onDelta: (chunk) => controller.enqueue(encoder.encode(event({ type: "mix_task_delta", taskId: task.id, content: chunk }))),
